@@ -12,6 +12,12 @@
   A future `rocket-cli db vacuum` command should pair VACUUM with this rebuild automatically.
 - **Affected files**: `src/core/migrations.ts` (FTS DDL), `src/core/search.ts`
 
+## api-client upload() is browser-only
+
+- **Status**: permanent upstream constraint
+- **What**: `@rocket.chat/api-client`'s `upload()` uses `XMLHttpRequest`, which does not exist in Node. File uploads therefore bypass `RcClient` entirely: `src/core/files.ts` does raw `fetch` + `FormData` against `rooms.media`/`rooms.mediaConfirm`. Do not try to route uploads through `RcClient`.
+- **Affected files**: `src/core/files.ts`
+
 ## npm install requires typia override
 
 - **Status**: permanent until fixed upstream

@@ -79,25 +79,42 @@ export function toIso(d: RcDate): string | null {
 
 function attachmentLine(a: RcWireAttachment): string {
   const title = a.title?.trim();
-  // `image_url` / `message_link` only exist on specific members of the
-  // MessageAttachment union, so read them off the loose wire shape.
+  // `image_url` / `video_url` / `audio_url` / `message_link` only exist on
+  // specific members of the MessageAttachment union, so read them off the loose
+  // wire shape. `title_link` is on the base (file attachments).
   const imageUrl = (a as { image_url?: string }).image_url;
+  const videoUrl = (a as { video_url?: string }).video_url;
+  const audioUrl = (a as { audio_url?: string }).audio_url;
   const messageLink = (a as { message_link?: string }).message_link;
   const titleLink = (a as { title_link?: string }).title_link;
-  // Quote / reply attachments link back to another message.
+  // Quote / reply attachments link back to another message — not a download.
   if (messageLink) {
     const quote = (a.text ?? a.description ?? '').trim();
     return `[quote] ${quote.slice(0, 80)}`;
   }
+  // For downloadable media/files, append the link as `<label> -> <link>` so the
+  // download_attachment tool can act on tool output. The link is the part after
+  // ' -> '.
   if (imageUrl) {
-    return `[image] ${title ?? imageUrl}`;
+    return withLink(`[image] ${title ?? imageUrl}`, imageUrl);
+  }
+  if (videoUrl) {
+    return withLink(`[video] ${title ?? videoUrl}`, videoUrl);
+  }
+  if (audioUrl) {
+    return withLink(`[audio] ${title ?? audioUrl}`, audioUrl);
   }
   if (titleLink || (title && !a.text)) {
-    return `[file] ${title ?? titleLink ?? ''}`.trimEnd();
+    return withLink(`[file] ${title ?? titleLink ?? ''}`.trimEnd(), titleLink);
   }
   // Plain fallback: title/text.
   const fallback = title ?? a.text?.trim() ?? a.description?.trim();
   return fallback ?? '[attachment]';
+}
+
+/** Append ` -> <link>` to a label when a usable download link exists. */
+function withLink(label: string, link: string | undefined): string {
+  return link ? `${label} -> ${link}` : label;
 }
 
 function attachmentsJson(attachments: RcWireAttachment[] | undefined): string | null {

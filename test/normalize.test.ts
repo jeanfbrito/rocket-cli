@@ -98,14 +98,17 @@ describe('messageToRow', () => {
     );
     expect(row.text).toBe('');
     const lines = JSON.parse(row.attachments_json!) as string[];
-    expect(lines).toEqual(['[file] report.pdf']);
+    // File attachments carry their download link as `<label> -> <link>`.
+    expect(lines).toEqual(['[file] report.pdf -> /file/report.pdf']);
   });
 
-  it('maps image / quote / plain attachments to one-liners', () => {
+  it('maps image / video / audio / quote / plain attachments to one-liners', () => {
     const row = messageToRow(
       plain({
         attachments: [
           { title: 'pic.png', image_url: '/img/pic.png' },
+          { title: 'clip.mp4', video_url: '/vid/clip.mp4' },
+          { title: 'song.mp3', audio_url: '/aud/song.mp3' },
           { message_link: '/msg/x', text: 'a'.repeat(120) },
           { text: 'just some text' },
         ] satisfies RcWireAttachment[],
@@ -113,9 +116,13 @@ describe('messageToRow', () => {
       RID,
     );
     const lines = JSON.parse(row.attachments_json!) as string[];
-    expect(lines[0]).toBe('[image] pic.png');
-    expect(lines[1]).toBe(`[quote] ${'a'.repeat(80)}`);
-    expect(lines[2]).toBe('just some text');
+    // Downloadable media include the link after ' -> '.
+    expect(lines[0]).toBe('[image] pic.png -> /img/pic.png');
+    expect(lines[1]).toBe('[video] clip.mp4 -> /vid/clip.mp4');
+    expect(lines[2]).toBe('[audio] song.mp3 -> /aud/song.mp3');
+    // Quotes link back to a message, not a download — no link suffix.
+    expect(lines[3]).toBe(`[quote] ${'a'.repeat(80)}`);
+    expect(lines[4]).toBe('just some text');
   });
 
   it('maps a system message (t: uj)', () => {
@@ -174,7 +181,7 @@ describe('rowToCompact', () => {
       ),
     );
     expect(compact.system).toBe('uj');
-    expect(compact.attachments).toEqual(['[file] f.txt']);
+    expect(compact.attachments).toEqual(['[file] f.txt -> /f']);
   });
 });
 
