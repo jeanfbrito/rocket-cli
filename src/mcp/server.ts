@@ -11,8 +11,10 @@ import { registerGetThreadMessagesTool } from './tools/get-thread-messages.js';
 import { registerListThreadsTool } from './tools/list-threads.js';
 import { registerSearchMessagesTool } from './tools/search-messages.js';
 import { registerSendMessageTool } from './tools/send-message.js';
+import { registerAddReactionTool } from './tools/add-reaction.js';
+import { registerGetUserProfileTool } from './tools/get-user-profile.js';
 
-/** Build a configured McpServer with all six tools registered against `app`. */
+/** Build a configured McpServer with all eight tools registered against `app`. */
 export function buildServer(app: App): McpServer {
   const server = new McpServer({ name: 'rocket-cli', version: '0.1.0' });
   registerListRoomsTool(server, app);
@@ -21,6 +23,8 @@ export function buildServer(app: App): McpServer {
   registerListThreadsTool(server, app);
   registerSearchMessagesTool(server, app);
   registerSendMessageTool(server, app);
+  registerAddReactionTool(server, app);
+  registerGetUserProfileTool(server, app);
   return server;
 }
 

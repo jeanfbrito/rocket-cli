@@ -115,7 +115,7 @@ See `.mcp.json.example` at the repo root for a copy-paste starting point.
 
 ## MCP tools
 
-Six tools are exposed to the LLM agent:
+Eight tools are exposed to the LLM agent:
 
 | Tool | What it does | Key inputs |
 |---|---|---|
@@ -125,6 +125,8 @@ Six tools are exposed to the LLM agent:
 | `list_threads` | List active threads in a room by last activity | `room`, `count?` (default 25), `text?` (filter parent text) |
 | `search_messages` | Full-text search across all cached rooms | `query`, `room?` (scopes + enables server fallback), `author?`, `limit?` (default 20) |
 | `send_message` | Post to a room or reply in a thread | `target` (#channel/@user/name/id), `text`, `threadId?` |
+| `add_reaction` | Add or remove an emoji reaction on a message | `messageId`, `emoji` (colon-wrapping optional), `remove?` (bool, default false) |
+| `get_user_profile` | Look up a user's profile by username or id | `user` (username with or without leading `@`, or user id) |
 
 `get_messages` and `list_threads` return an envelope with `room`, `syncedThrough`, and `coverage` so the agent knows the freshness and depth of the cached data. Thread parents in `get_messages` carry a `replyCount`; pass that message's `id` as `threadId` to `get_thread_messages`.
 

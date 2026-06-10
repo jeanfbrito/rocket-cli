@@ -103,16 +103,18 @@ describe('mcp server', () => {
     db?.close();
   });
 
-  it('lists exactly six tools with readOnlyHint on the five read tools', async () => {
+  it('lists exactly eight tools with readOnlyHint on the six read tools', async () => {
     client = await connect(app);
     const { tools } = await client.listTools();
 
-    expect(tools).toHaveLength(6);
+    expect(tools).toHaveLength(8);
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
+        'add_reaction',
         'get_messages',
         'get_thread_messages',
+        'get_user_profile',
         'list_rooms',
         'list_threads',
         'search_messages',
@@ -128,6 +130,7 @@ describe('mcp server', () => {
       [
         'get_messages',
         'get_thread_messages',
+        'get_user_profile',
         'list_rooms',
         'list_threads',
         'search_messages',
@@ -136,6 +139,9 @@ describe('mcp server', () => {
 
     const send = tools.find((t) => t.name === 'send_message')!;
     expect(send.annotations?.readOnlyHint).not.toBe(true);
+
+    const reaction = tools.find((t) => t.name === 'add_reaction')!;
+    expect(reaction.annotations?.readOnlyHint).not.toBe(true);
   });
 
   it('list_rooms returns seeded rooms with type mapping', async () => {
@@ -241,5 +247,87 @@ describe('mcp server', () => {
 
     expect(res.isError).toBe(true);
     expect(resultText(res)).toMatch(/not found/i);
+  });
+
+  it('add_reaction posts to /v1/chat.react with colon-wrapped emoji', async () => {
+    rc.onPost('/v1/chat.react', { success: true });
+    client = await connect(app);
+
+    const res = await client.callTool({
+      name: 'add_reaction',
+      arguments: { messageId: 'msg1', emoji: ':tada:' },
+    });
+    const payload = resultJson(res);
+
+    expect(rc.posts).toHaveLength(1);
+    expect(rc.posts[0]!.endpoint).toBe('/v1/chat.react');
+    expect(rc.posts[0]!.body).toEqual({ messageId: 'msg1', emoji: ':tada:', shouldReact: true });
+    expect(payload).toEqual({ reacted: true, messageId: 'msg1', emoji: ':tada:' });
+  });
+
+  it('add_reaction wraps emoji given without colons', async () => {
+    rc.onPost('/v1/chat.react', { success: true });
+    client = await connect(app);
+
+    await client.callTool({
+      name: 'add_reaction',
+      arguments: { messageId: 'msg2', emoji: 'tada' },
+    });
+
+    expect(rc.posts[0]!.body).toMatchObject({ emoji: ':tada:' });
+  });
+
+  it('add_reaction with remove: true sends shouldReact false', async () => {
+    rc.onPost('/v1/chat.react', { success: true });
+    client = await connect(app);
+
+    const res = await client.callTool({
+      name: 'add_reaction',
+      arguments: { messageId: 'msg3', emoji: ':thumbsup:', remove: true },
+    });
+    const payload = resultJson(res);
+
+    expect(rc.posts[0]!.body).toMatchObject({ shouldReact: false });
+    expect(payload.reacted).toBe(false);
+  });
+
+  it('get_user_profile strips leading @ and returns compact shape', async () => {
+    rc.onGet('/v1/users.info', {
+      user: {
+        _id: 'uid42',
+        username: 'alice',
+        name: 'Alice Smith',
+        status: 'online',
+        statusText: 'coding',
+        bio: 'engineer',
+        utcOffset: -3,
+        active: true,
+        roles: ['user'],
+        emails: [{ address: 'alice@example.com', verified: true }],
+      },
+    });
+    client = await connect(app);
+
+    const res = await client.callTool({
+      name: 'get_user_profile',
+      arguments: { user: '@alice' },
+    });
+    const payload = resultJson(res);
+
+    // Verify @ was stripped and username query used.
+    expect(rc.gets[0]!.endpoint).toBe('/v1/users.info');
+    expect(rc.gets[0]!.params).toEqual({ username: 'alice' });
+
+    expect(payload).toEqual({
+      id: 'uid42',
+      username: 'alice',
+      name: 'Alice Smith',
+      status: 'online',
+      statusText: 'coding',
+      bio: 'engineer',
+      timezone: -3,
+      roles: ['user'],
+      email: 'alice@example.com',
+    });
   });
 });
