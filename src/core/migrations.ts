@@ -163,6 +163,32 @@ export const MIGRATIONS: Migration[] = [
       `INSERT INTO messages_fts(messages_fts) VALUES('rebuild');`,
     ],
   },
+  {
+    // v3 — custom-emoji cache for the EmojiDirectory. Mirrors the rooms table:
+    // a flat local mirror of the server's custom-emoji registry, refreshed via
+    // /v1/emoji-custom.list (full list, or delta when `updatedSince` is sent).
+    // `aliases` is the JSON-stringified string[] from IEmojiCustom.aliases;
+    // `name` is UNIQUE because the server enforces emoji-name uniqueness and we
+    // resolve/suggest by name. `updated_at` holds the serialized _updatedAt so a
+    // delta sync can compute a watermark and detect whether the image changed.
+    //
+    // `image` / `content_type` cache the actual asset bytes, fetched lazily on
+    // refresh from the public `/emoji-custom/{name}.{ext}` web route (see
+    // EmojiDirectory.refresh). The image is an enhancement: a NULL image is a
+    // valid row whose metadata is still authoritative.
+    version: 3,
+    statements: [
+      `CREATE TABLE custom_emojis (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        aliases TEXT NOT NULL DEFAULT '[]',
+        extension TEXT,
+        updated_at TEXT,
+        image BLOB,
+        content_type TEXT
+      );`,
+    ],
+  },
 ];
 
 /** Highest schema version defined by the migration set. */

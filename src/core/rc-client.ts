@@ -84,6 +84,30 @@ export type ReactResult = Serialized<OperationResult<'POST', '/v1/chat.react'>>;
 export type UserInfoResult = Serialized<OperationResult<'GET', '/v1/users.info'>>;
 export type GetMessageResult = Serialized<OperationResult<'GET', '/v1/chat.getMessage'>>;
 
+// emoji-custom.list: rest-typings models the result as
+//   { emojis: { update: IEmojiCustom[]; remove: IEmojiCustom[] } }
+// (both arrays REQUIRED). The live server (apps/meteor/app/api/server/v1/
+// emoji-custom.ts) only populates `remove` when `updatedSince` is supplied —
+// the full-list path returns `remove: []`. We define a NARROW local wire type
+// (following the syncMessages precedent above) rather than reuse the full
+// IEmojiCustom: we consume only the five fields the directory mirrors, and the
+// REST payload is the serialized form (Date -> string) which is looser than
+// the canonical type. `remove` carries the same per-emoji shape on the delta
+// path (deleted records still expose _id/name).
+export interface CustomEmojiWire {
+  _id: string;
+  name: string;
+  aliases?: string[];
+  extension?: string;
+  _updatedAt?: string;
+}
+export interface CustomEmojiListResult {
+  emojis: {
+    update: CustomEmojiWire[];
+    remove: CustomEmojiWire[];
+  };
+}
+
 export class RcClient {
   private readonly client: RestClient;
   private readonly baseUrl: string;
@@ -259,6 +283,21 @@ export class RcClient {
   /** GET /v1/chat.getMessage — a single message by id. */
   getMessage(params: { msgId: string }): Promise<GetMessageResult> {
     return this.request<GetMessageResult>('GET', '/v1/chat.getMessage', { msgId: params.msgId });
+  }
+
+  /**
+   * GET /v1/emoji-custom.list — custom-emoji registry.
+   * Omitting `updatedSince` returns the full list with `remove: []`. Passing an
+   * ISO timestamp returns only emojis with `_updatedAt > updatedSince` in
+   * `update`, plus emojis deleted after that time in `remove`. See
+   * CustomEmojiListResult for the version note.
+   */
+  listCustomEmojis(updatedSince?: string): Promise<CustomEmojiListResult> {
+    return this.request<CustomEmojiListResult>(
+      'GET',
+      '/v1/emoji-custom.list',
+      updatedSince === undefined ? {} : { updatedSince },
+    );
   }
 
   /**

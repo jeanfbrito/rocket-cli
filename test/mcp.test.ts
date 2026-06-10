@@ -1,11 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { openDb, type Db } from '../src/core/db.js';
 import type { App } from '../src/core/app.js';
 import { RoomDirectory } from '../src/core/rooms.js';
+import { EmojiDirectory } from '../src/core/emojis.js';
 import { SyncEngine } from '../src/core/sync.js';
 import { SearchService } from '../src/core/search.js';
+import { RcApiError } from '../src/core/errors.js';
 import type { RcSubscription } from '../src/core/normalize.js';
 import { buildServer } from '../src/mcp/server.js';
 
@@ -28,6 +30,19 @@ class FakeRc {
   private threadMessages: unknown = { messages: [], total: 0 };
   private postMessageResponses: unknown[] = [];
   private userInfoResponses: unknown[] = [];
+  private customEmojis: unknown = { emojis: { update: [], remove: [] } };
+  // When set, react() throws this instead of succeeding.
+  private reactError: unknown = undefined;
+
+  onCustomEmojis(response: unknown): this {
+    this.customEmojis = response;
+    return this;
+  }
+
+  failReactWith(err: unknown): this {
+    this.reactError = err;
+    return this;
+  }
 
   onSubscriptions(response: unknown): this {
     this.subscriptions = response;
@@ -96,7 +111,12 @@ class FakeRc {
 
   async react(body: Record<string, unknown>): Promise<any> {
     this.reacts.push({ body });
+    if (this.reactError !== undefined) throw this.reactError;
     return { success: true };
+  }
+
+  async listCustomEmojis(): Promise<any> {
+    return this.customEmojis;
   }
 
   async userInfo(params: Record<string, unknown>): Promise<any> {
@@ -116,8 +136,15 @@ function sub(over: Partial<RcSubscription>): RcSubscription {
   return { rid: 'r', name: 'name', fname: 'fname', t: 'c', unread: 0, ...over };
 }
 
-function makeApp(db: Db, rc: FakeRc): App {
+function makeApp(db: Db, rc: FakeRc, opts?: { emojiImages?: boolean }): App {
+  const emojiImages = opts?.emojiImages ?? true;
   const rooms = new RoomDirectory(db, rc as never);
+  const emojis = new EmojiDirectory(
+    db,
+    rc as never,
+    { url: 'http://example.com', token: 'tok', userId: 'uid' },
+    emojiImages,
+  );
   const sync = new SyncEngine(db, rc as never, rooms, { ttlSeconds: 60, backfillLimit: 100 });
   const search = new SearchService(db, rc as never, sync);
   const config = {
@@ -127,8 +154,9 @@ function makeApp(db: Db, rc: FakeRc): App {
     dbPath: ':memory:',
     ttlSeconds: 60,
     backfillLimit: 100,
+    emojiImages,
   };
-  return { config, db, rc: rc as never, rooms, sync, search };
+  return { config, db, rc: rc as never, rooms, emojis, sync, search };
 }
 
 /** Connect an in-memory client to a server built around `app`. */
@@ -171,19 +199,21 @@ describe('mcp server', () => {
     db?.close();
   });
 
-  it('lists exactly ten tools with readOnlyHint on the six read tools', async () => {
+  it('lists exactly twelve tools with readOnlyHint on the read tools', async () => {
     client = await connect(app);
     const { tools } = await client.listTools();
 
-    expect(tools).toHaveLength(10);
+    expect(tools).toHaveLength(12);
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
         'add_reaction',
         'download_attachment',
+        'get_custom_emoji',
         'get_messages',
         'get_thread_messages',
         'get_user_profile',
+        'list_custom_emojis',
         'list_rooms',
         'list_threads',
         'search_messages',
@@ -198,9 +228,11 @@ describe('mcp server', () => {
       .sort();
     expect(readOnly).toEqual(
       [
+        'get_custom_emoji',
         'get_messages',
         'get_thread_messages',
         'get_user_profile',
+        'list_custom_emojis',
         'list_rooms',
         'list_threads',
         'search_messages',
@@ -395,5 +427,130 @@ describe('mcp server', () => {
       roles: ['user'],
       email: 'alice@example.com',
     });
+  });
+
+  it('list_custom_emojis refreshes and returns names + aliases', async () => {
+    // Background image fill (fire-and-forget) calls fetch; stub it so nothing
+    // hits the network or leaks a handle.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new Uint8Array([1]), {
+      status: 200,
+      headers: { 'content-type': 'image/png' },
+    })));
+    rc.onCustomEmojis({
+      emojis: {
+        update: [
+          { _id: 'e1', name: 'rocketcli', aliases: ['rkt'], extension: 'png' },
+          { _id: 'e2', name: 'grinch', aliases: [], extension: 'gif' },
+        ],
+        remove: [],
+      },
+    });
+    client = await connect(app);
+
+    const res = await client.callTool({ name: 'list_custom_emojis', arguments: {} });
+    const payload = resultJson(res);
+
+    expect(payload.count).toBe(2);
+    const names = payload.emojis.map((e: any) => e.name).sort();
+    expect(names).toEqual(['grinch', 'rocketcli']);
+    const rkt = payload.emojis.find((e: any) => e.name === 'rocketcli');
+    expect(rkt.aliases).toEqual(['rkt']);
+
+    vi.unstubAllGlobals();
+  });
+
+  it('add_reaction enriches an invalid-emoji error with suggestions', async () => {
+    // Seed the emoji cache directly and freeze the watermark so suggest() reads
+    // it without a refresh.
+    db.upsertEmojis([
+      { id: 'e1', name: 'rocketcli', aliases: JSON.stringify([]), extension: 'png', updated_at: null },
+    ]);
+    db.setMeta('emojis_refreshed_at', new Date().toISOString());
+    rc.failReactWith(new RcApiError('Invalid emoji provided.', 400, { errorType: 'error-not-allowed' }));
+    client = await connect(app);
+
+    const res = (await client.callTool({
+      name: 'add_reaction',
+      arguments: { messageId: 'm1', emoji: 'rockt' },
+    })) as { isError?: boolean };
+
+    expect(res.isError).toBe(true);
+    const text = resultText(res);
+    expect(text).toMatch(/Invalid emoji/);
+    expect(text).toMatch(/rocketcli/);
+    expect(text).toMatch(/list_custom_emojis/);
+  });
+});
+
+describe('mcp emoji image tools', () => {
+  let db: Db;
+  let rc: FakeRc;
+  let client: Client;
+
+  afterEach(async () => {
+    await client?.close();
+    db?.close();
+    vi.unstubAllGlobals();
+  });
+
+  it('get_custom_emoji returns image content for a seeded blob', async () => {
+    db = openDb(':memory:');
+    rc = new FakeRc();
+    const app = makeApp(db, rc);
+    db.upsertEmojis([
+      { id: 'e1', name: 'rocketcli', aliases: JSON.stringify(['rkt']), extension: 'png', updated_at: null },
+    ]);
+    db.setEmojiImage('e1', Buffer.from([1, 2, 3, 4]), 'image/png');
+    db.setMeta('emojis_refreshed_at', new Date().toISOString());
+    client = await connect(app);
+
+    const res = (await client.callTool({
+      name: 'get_custom_emoji',
+      arguments: { name: 'rocketcli' },
+    })) as { content: Array<{ type: string; data?: string; mimeType?: string; text?: string }> };
+
+    const image = res.content.find((c) => c.type === 'image')!;
+    expect(image.mimeType).toBe('image/png');
+    expect(Buffer.from(image.data!, 'base64')).toEqual(Buffer.from([1, 2, 3, 4]));
+    const meta = JSON.parse(res.content.find((c) => c.type === 'text')!.text!);
+    expect(meta).toEqual({ name: 'rocketcli', aliases: ['rkt'] });
+  });
+
+  it('get_custom_emoji returns text-only info when image caching is disabled', async () => {
+    db = openDb(':memory:');
+    rc = new FakeRc();
+    const app = makeApp(db, rc, { emojiImages: false });
+    db.upsertEmojis([
+      { id: 'e1', name: 'rocketcli', aliases: JSON.stringify(['rkt']), extension: 'png', updated_at: null },
+    ]);
+    db.setMeta('emojis_refreshed_at', new Date().toISOString());
+    client = await connect(app);
+
+    const res = (await client.callTool({
+      name: 'get_custom_emoji',
+      arguments: { name: 'rocketcli' },
+    })) as { isError?: boolean; content: Array<{ type: string; text?: string }> };
+
+    expect(res.isError).not.toBe(true);
+    expect(res.content.some((c) => c.type === 'image')).toBe(false);
+    const meta = JSON.parse(res.content.find((c) => c.type === 'text')!.text!);
+    expect(meta.name).toBe('rocketcli');
+    expect(meta.aliases).toEqual(['rkt']);
+    expect(meta.imageUrl).toContain('/emoji-custom/rocketcli.png');
+    expect(meta.note).toMatch(/disabled/i);
+  });
+
+  it('disabled mode: refresh stores metadata with zero image fetches', async () => {
+    db = openDb(':memory:');
+    rc = new FakeRc().onCustomEmojis({
+      emojis: { update: [{ _id: 'e1', name: 'a', aliases: [], extension: 'png' }], remove: [] },
+    });
+    const fetchMock = vi.fn(async () => new Response(new Uint8Array([1]), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const app = makeApp(db, rc, { emojiImages: false });
+
+    await app.emojis.refresh();
+    expect(db.getEmojiImage('e1')).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

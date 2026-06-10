@@ -10,6 +10,7 @@ import { register as registerThreads } from './commands/threads.js';
 import { register as registerWatch } from './commands/watch.js';
 import { register as registerUpload } from './commands/upload.js';
 import { register as registerDownload } from './commands/download.js';
+import { register as registerEmojis } from './commands/emojis.js';
 
 const program = new Command();
 
@@ -29,5 +30,6 @@ registerThreads(program);
 registerWatch(program);
 registerUpload(program);
 registerDownload(program);
+registerEmojis(program);
 
 program.parse(process.argv);

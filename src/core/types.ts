@@ -45,6 +45,24 @@ export interface RoomRow {
 }
 
 /**
+ * A row in the `custom_emojis` table. Mirrors the v3 SQLite schema.
+ * `aliases` is the JSON-stringified `string[]` from IEmojiCustom.aliases;
+ * `name` is NOT NULL + UNIQUE. The directory layer parses `aliases` back into
+ * an array when surfacing emojis to callers.
+ */
+export interface EmojiRow {
+  id: string;
+  name: string;
+  aliases: string; // JSON array of alias strings, e.g. '["smile"]'
+  extension: string | null;
+  updated_at: string | null; // ISO8601, from _updatedAt
+  /** Cached asset bytes, or null when not yet fetched. better-sqlite3 returns
+   *  a Buffer for BLOB columns. */
+  image?: Buffer | null;
+  content_type?: string | null; // MIME type of the cached image, or null
+}
+
+/**
  * Compact, LLM-facing message record. Empty / null fields are omitted.
  */
 export interface CompactMessage {

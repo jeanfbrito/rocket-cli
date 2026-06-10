@@ -83,6 +83,12 @@ node dist/cli.js upload general /path/to/report.pdf --text "Q2 report"
 # Download an attachment (use the link from `messages` output: [file] name -> /file-upload/…)
 node dist/cli.js download /file-upload/abc123/report.pdf --out /tmp/report.pdf
 
+# List custom emojis registered on the server
+node dist/cli.js emojis
+node dist/cli.js emojis --filter rocket
+node dist/cli.js emojis --sync                  # force a refresh, ignore TTL
+node dist/cli.js emojis --export /tmp/emoji     # save every emoji image to a directory
+
 # Start the MCP stdio server (used by Claude Code / Claude Desktop)
 node dist/cli.js serve
 ```
@@ -161,6 +167,16 @@ node dist/cli.js serve
 |---|---|
 | `--out <path>` | Where to save the file (default: `~/Downloads/<name>`) |
 
+### `emojis` flags
+
+| Flag | Description |
+|---|---|
+| `--filter <substr>` | Case-insensitive name substring filter |
+| `--sync` | Force a refresh, ignoring the cache TTL |
+| `--export <dir>` | Fetch and write each emoji image as `<name>.<ext>` to a directory |
+
+Image caching can be disabled with `ROCKET_CLI_EMOJI_IMAGES=false` (metadata only); `--export` and `get_custom_emoji` then degrade to names/aliases plus the server image URL.
+
 ## MCP server for Claude Code
 
 Add to `.mcp.json` in your project root (or `~/.claude/mcp.json` for global):
@@ -201,7 +217,7 @@ The `-e` flag sets env vars scoped to this MCP server; they are not exported to 
 
 ## MCP tools
 
-Ten tools are exposed to the LLM agent:
+Twelve tools are exposed to the LLM agent:
 
 | Tool | What it does | Key inputs |
 |---|---|---|
@@ -215,6 +231,8 @@ Ten tools are exposed to the LLM agent:
 | `get_user_profile` | Look up a user's profile by username or id | `user` (username with or without leading `@`, or user id) |
 | `upload_file` | Attach a local file to a room or thread | `room` (#channel/@user/name/id), `filePath` (absolute path), `text?` (caption), `threadId?`, `fileName?` |
 | `download_attachment` | Download a message attachment to local disk | `fileUrl` (attachment link after `->`, e.g. `/file-upload/…`), `savePath?` (default: `~/Downloads/<name>`) |
+| `list_custom_emojis` | List custom emojis registered on this server (beyond unicode) | `filter?` (name substring) |
+| `get_custom_emoji` | Show a custom emoji's image (returns image content) | `name` (with or without colons) |
 
 `get_messages` and `list_threads` return an envelope with `room`, `syncedThrough`, and `coverage` so the agent knows the freshness and depth of the cached data. Thread parents in `get_messages` carry a `replyCount`; pass that message's `id` as `threadId` to `get_thread_messages`.
 
@@ -240,6 +258,7 @@ Attachment links appear in `get_messages` output as `[file] name -> /file-upload
 | `ROCKET_CLI_DB` | no | `~/.local/share/rocket-cli/cache.db` | Override the SQLite database path |
 | `ROCKET_CLI_SYNC_TTL_SECONDS` | no | `60` | How long before a cached room is considered stale |
 | `ROCKET_CLI_BACKFILL_LIMIT` | no | `500` | Max messages to fetch on initial room backfill |
+| `ROCKET_CLI_EMOJI_IMAGES` | no | `true` | Cache custom-emoji image bytes. `false`/`0` caches metadata only (no image fetch/storage) |
 
 ## Known issues
 

@@ -64,7 +64,7 @@ function ftsRowids(db: Db, query: string): number[] {
 describe('migrations', () => {
   it('migrates a :memory: db cleanly and sets schema_version', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('2');
+    expect(db.getMeta('schema_version')).toBe('3');
     const tables = (
       db.conn
         .prepare(
@@ -73,7 +73,14 @@ describe('migrations', () => {
         .all() as { name: string }[]
     ).map((r) => r.name);
     expect(tables).toEqual(
-      expect.arrayContaining(['meta', 'rooms', 'messages', 'thread_sync', 'messages_fts']),
+      expect.arrayContaining([
+        'meta',
+        'rooms',
+        'messages',
+        'thread_sync',
+        'messages_fts',
+        'custom_emojis',
+      ]),
     );
     db.close();
   });
@@ -88,7 +95,7 @@ describe('migrations', () => {
 
       const db2 = openDb(path);
       // Still at the latest version, prior data preserved → no destructive re-run.
-      expect(db2.getMeta('schema_version')).toBe('2');
+      expect(db2.getMeta('schema_version')).toBe('3');
       expect(db2.getMeta('instance_url')).toBe('https://example.com');
       db2.close();
     } finally {

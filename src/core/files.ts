@@ -236,6 +236,52 @@ export async function downloadFile(
   return { path: outPath, bytes: written.size, contentType };
 }
 
+export interface EmojiImageResult {
+  bytes: Buffer;
+  contentType: string;
+}
+
+/**
+ * Fetch a custom-emoji image from the public `/emoji-custom/{name}.{ext}` web
+ * route (apps/meteor/app/emoji-custom/server/startup/emoji-custom.js — a
+ * `WebApp.connectHandlers` route, NOT under `/api`). The route performs no auth
+ * check (it looks the emoji up by name and streams the file, falling back to an
+ * SVG), so the X-Auth-Token / X-User-Id headers are harmless but unnecessary;
+ * we send them anyway for consistency with the other raw fetches here. The
+ * server sets Content-Type from the extension (svg -> image/svg+xml, png ->
+ * image/png, else image/jpeg). Returns the bytes in memory (emoji assets are
+ * tiny gifs/pngs). Throws (mapped) on network failure or non-2xx.
+ */
+export async function fetchEmojiImage(
+  cfg: FilesConfig,
+  name: string,
+  extension: string,
+): Promise<EmojiImageResult> {
+  const origin = new URL(cfg.url).origin;
+  const path = `/emoji-custom/${encodeURIComponent(name)}.${encodeURIComponent(extension)}`;
+  const target = new URL(path, origin);
+  const ctx = `GET ${path} @ ${origin}`;
+
+  let res: Response;
+  try {
+    res = await fetch(target, {
+      method: 'GET',
+      headers: authHeaders(cfg),
+      redirect: 'follow',
+    });
+  } catch (err) {
+    throw await mapRcError(err, ctx);
+  }
+  if (!res.ok) {
+    throw await mapRcError(res, ctx);
+  }
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  const contentType =
+    res.headers.get('content-type') ?? MIME_BY_EXT[`.${extension.toLowerCase()}`] ?? 'application/octet-stream';
+  return { bytes: buf, contentType };
+}
+
 /** Strip path traversal and separators from a URL-derived filename. */
 function sanitizeFilename(name: string): string {
   return name

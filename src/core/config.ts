@@ -55,6 +55,9 @@ const configSchema = z.object({
   dbPath: z.string(),
   ttlSeconds: z.number().int().positive(),
   backfillLimit: z.number().int().positive(),
+  /** Whether to cache custom-emoji image bytes (lazy fetch + background fill).
+   *  When false, only emoji metadata (names/aliases) is cached. */
+  emojiImages: z.boolean(),
 });
 
 export type Config = z.output<typeof configSchema>;
@@ -74,6 +77,10 @@ export function loadConfig(): Config {
     dbPath: process.env['ROCKET_CLI_DB'] || defaultDbPath(),
     ttlSeconds: Number(process.env['ROCKET_CLI_SYNC_TTL_SECONDS'] ?? '60'),
     backfillLimit: Number(process.env['ROCKET_CLI_BACKFILL_LIMIT'] ?? '500'),
+    // Boolean-ish: only 'false' / '0' disable; anything else (incl. unset) is true.
+    emojiImages: !['false', '0'].includes(
+      (process.env['ROCKET_CLI_EMOJI_IMAGES'] ?? 'true').trim().toLowerCase(),
+    ),
   };
 
   const result = configSchema.safeParse(raw);

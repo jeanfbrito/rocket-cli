@@ -2,6 +2,7 @@ import { loadConfig, type Config } from './config.js';
 import { openDb, type Db } from './db.js';
 import { RcClient } from './rc-client.js';
 import { RoomDirectory } from './rooms.js';
+import { EmojiDirectory } from './emojis.js';
 import { SyncEngine } from './sync.js';
 import { SearchService } from './search.js';
 import { messageToRow, rowToCompact, type RcWireMessage } from './normalize.js';
@@ -12,6 +13,7 @@ export interface App {
   db: Db;
   rc: RcClient;
   rooms: RoomDirectory;
+  emojis: EmojiDirectory;
   sync: SyncEngine;
   search: SearchService;
 }
@@ -21,12 +23,18 @@ export function createApp(config?: Config): App {
   const db = openDb(cfg.dbPath);
   const rc = new RcClient({ url: cfg.url, token: cfg.token, userId: cfg.userId });
   const rooms = new RoomDirectory(db, rc);
+  const emojis = new EmojiDirectory(
+    db,
+    rc,
+    { url: cfg.url, token: cfg.token, userId: cfg.userId },
+    cfg.emojiImages,
+  );
   const sync = new SyncEngine(db, rc, rooms, {
     ttlSeconds: cfg.ttlSeconds,
     backfillLimit: cfg.backfillLimit,
   });
   const search = new SearchService(db, rc, sync);
-  return { config: cfg, db, rc, rooms, sync, search };
+  return { config: cfg, db, rc, rooms, emojis, sync, search };
 }
 
 export async function sendMessage(

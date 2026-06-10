@@ -1,9 +1,9 @@
 import BetterSqlite3 from 'better-sqlite3';
 import type { Database, Statement } from 'better-sqlite3';
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from './migrations.js';
-import type { MessageRow, RoomRow } from './types.js';
+import type { EmojiRow, MessageRow, RoomRow } from './types.js';
 
-export type { MessageRow, RoomRow } from './types.js';
+export type { EmojiRow, MessageRow, RoomRow } from './types.js';
 
 /** A row in the `thread_sync` table. */
 export interface ThreadSyncRow {
@@ -79,10 +79,16 @@ export class Db {
   private readonly stmtGetMessage: Statement;
   private readonly stmtCountThreadReplies: Statement;
   private readonly stmtGetThreadSync: Statement;
+  private readonly stmtUpsertEmoji: Statement;
+  private readonly stmtRemoveEmoji: Statement;
+  private readonly stmtSetEmojiImage: Statement;
+  private readonly stmtGetEmojiImage: Statement;
 
   private readonly txUpsertRooms: (rooms: RoomRow[]) => void;
   private readonly txUpsertMessages: (rows: MessageRow[]) => void;
   private readonly txMarkDeleted: (ids: string[]) => void;
+  private readonly txUpsertEmojis: (rows: EmojiRow[]) => void;
+  private readonly txRemoveEmojis: (ids: string[]) => void;
 
   constructor(conn: Database) {
     this.conn = conn;
@@ -138,6 +144,29 @@ export class Db {
       'SELECT * FROM thread_sync WHERE tmid = ?',
     );
 
+    // Keyed on the PK (id): the common server mutation is a rename (same _id,
+    // new name/aliases), which this upsert applies in place. The `name` UNIQUE
+    // constraint still guards against two distinct emojis claiming one name.
+    // Metadata-only: it never touches image/content_type, so a no-op delta
+    // re-upsert leaves a previously-cached image intact. The image is written
+    // separately via setEmojiImage after the asset fetch succeeds.
+    this.stmtUpsertEmoji = conn.prepare(
+      `INSERT INTO custom_emojis (id, name, aliases, extension, updated_at)
+       VALUES (@id, @name, @aliases, @extension, @updated_at)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         aliases = excluded.aliases,
+         extension = excluded.extension,
+         updated_at = excluded.updated_at`,
+    );
+    this.stmtRemoveEmoji = conn.prepare('DELETE FROM custom_emojis WHERE id = ?');
+    this.stmtSetEmojiImage = conn.prepare(
+      'UPDATE custom_emojis SET image = @image, content_type = @content_type WHERE id = @id',
+    );
+    this.stmtGetEmojiImage = conn.prepare(
+      'SELECT image, content_type FROM custom_emojis WHERE id = ?',
+    );
+
     this.txUpsertRooms = conn.transaction((rooms: RoomRow[]) => {
       for (const room of rooms)
         this.stmtUpsertRoom.run({
@@ -152,6 +181,21 @@ export class Db {
     });
     this.txMarkDeleted = conn.transaction((ids: string[]) => {
       for (const id of ids) this.stmtMarkDeleted.run(id);
+    });
+    this.txUpsertEmojis = conn.transaction((rows: EmojiRow[]) => {
+      for (const row of rows)
+        // Bind ONLY the metadata columns — passing image/content_type would be
+        // an unused named param (better-sqlite3 rejects extras).
+        this.stmtUpsertEmoji.run({
+          id: row.id,
+          name: row.name,
+          aliases: row.aliases,
+          extension: row.extension ?? null,
+          updated_at: row.updated_at ?? null,
+        });
+    });
+    this.txRemoveEmojis = conn.transaction((ids: string[]) => {
+      for (const id of ids) this.stmtRemoveEmoji.run(id);
     });
   }
 
@@ -324,6 +368,63 @@ export class Db {
            fully_loaded = excluded.fully_loaded`,
       )
       .run({ tmid, lastSyncedAt, fullyLoaded });
+  }
+
+  // ---- custom emojis ------------------------------------------------------
+
+  upsertEmojis(rows: EmojiRow[]): void {
+    this.txUpsertEmojis(rows);
+  }
+
+  removeEmojis(ids: string[]): void {
+    this.txRemoveEmojis(ids);
+  }
+
+  /**
+   * All custom emojis, ordered by name. With `nameLike`, restricts to rows
+   * whose name contains the substring (case-insensitive via LIKE). Alias-aware
+   * matching is intentionally NOT done here — the db layer stays dumb and the
+   * EmojiDirectory parses `aliases` JSON to filter/suggest in JS.
+   *
+   * Selects metadata columns only (no `image` BLOB) — list/suggest never need
+   * the bytes, so we avoid dragging blobs through every read. Use
+   * getEmojiImage() for the asset.
+   */
+  findEmojis(nameLike?: string): EmojiRow[] {
+    const cols = 'id, name, aliases, extension, updated_at';
+    if (nameLike === undefined) {
+      return this.conn
+        .prepare(`SELECT ${cols} FROM custom_emojis ORDER BY name`)
+        .all() as EmojiRow[];
+    }
+    return this.conn
+      .prepare(`SELECT ${cols} FROM custom_emojis WHERE name LIKE @nameLike ORDER BY name`)
+      .all({ nameLike: `%${nameLike}%` }) as EmojiRow[];
+  }
+
+  /** True if a custom emoji with this exact name exists (case-insensitive). */
+  emojiExists(name: string): boolean {
+    const row = this.conn
+      .prepare('SELECT 1 FROM custom_emojis WHERE name = ? COLLATE NOCASE LIMIT 1')
+      .get(name);
+    return row !== undefined;
+  }
+
+  /** Store (or replace) the cached image bytes + MIME for an emoji by id. */
+  setEmojiImage(id: string, image: Buffer, contentType: string): void {
+    this.stmtSetEmojiImage.run({ id, image, content_type: contentType });
+  }
+
+  /**
+   * Cached image bytes + content type for an emoji by id, or undefined if the
+   * row is missing or its image has not been fetched yet.
+   */
+  getEmojiImage(id: string): { image: Buffer; contentType: string } | undefined {
+    const row = this.stmtGetEmojiImage.get(id) as
+      | { image: Buffer | null; content_type: string | null }
+      | undefined;
+    if (!row || row.image == null || row.content_type == null) return undefined;
+    return { image: row.image, contentType: row.content_type };
   }
 
   // ---- lifecycle ----------------------------------------------------------
