@@ -4,6 +4,41 @@ Rocket.Chat bridge with a local SQLite/FTS5 cache — CLI for humans, MCP server
 
 On first read a room is backfilled (up to 500 messages / 30 days). Subsequent reads hit `chat.syncMessages` for deltas (60 s TTL), then serve from SQLite — zero network on cache-fresh rooms. Full-text search runs across all cached rooms locally via FTS5; when scoped to a room it falls back to the server and ingests the results into the cache.
 
+```mermaid
+graph LR
+    Agent["LLM Agent\n(Claude · MCP stdio)"]
+    Human["Human\n(CLI)"]
+
+    subgraph Core["Core"]
+        RD["RoomDirectory"]
+        SE["SyncEngine"]
+        SS["SearchService"]
+        AT["Attention\n(mentions · unread)"]
+        ED["EmojiDirectory"]
+    end
+
+    subgraph Cache["SQLite cache"]
+        MSG["messages\n+ FTS5 index"]
+        META["rooms · emojis"]
+    end
+
+    RC["Rocket.Chat\n(REST API)"]
+
+    Agent -->|"MCP tools"| Core
+    Human -->|"commands"| Core
+
+    Core -->|"cache hit: 0 network, sub-ms"| Cache
+    Core -->|"miss/stale: backfill + syncMessages deltas"| RC
+    RC -->|"write-through"| Cache
+
+    Agent <-->|"open_url / permalinks"| RC
+
+    classDef cache fill:#f0f7ff,stroke:#4a90d9,stroke-width:2px
+    class Cache cache
+```
+
+*Architecture at a glance: agents and humans share one Core; the SQLite cache absorbs most reads; the server is only hit on cache miss or write.*
+
 ## What needs my attention
 
 The headline feature: one call answers "what did I miss?". `get_attention` (MCP) / `rocket-cli attention` (CLI) fuses mentions of you, unread DMs, unread thread replies, and unread channel messages into a single prioritized, deduplicated digest — a message that both mentions you and is unread appears once, in the mentions section, flagged `alsoUnread`. Every item carries a clickable Rocket.Chat link, and the whole flow is strictly read-only (it never clears a single unread badge). Paste any of those links back to the agent via `open_url` (or `rocket-cli open <url>`) and you get the surrounding conversation plus the ids needed to reply — a full triage-to-reply round-trip without leaving the chat.
