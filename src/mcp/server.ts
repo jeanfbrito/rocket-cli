@@ -1,5 +1,5 @@
 // MCP server: wraps the shared core (App) behind a stdio transport and
-// registers the six Rocket.Chat tools. stdout is reserved for the MCP protocol
+// registers the ten Rocket.Chat tools. stdout is reserved for the MCP protocol
 // — every other byte of output goes to stderr via the core logger.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -13,8 +13,10 @@ import { registerSearchMessagesTool } from './tools/search-messages.js';
 import { registerSendMessageTool } from './tools/send-message.js';
 import { registerAddReactionTool } from './tools/add-reaction.js';
 import { registerGetUserProfileTool } from './tools/get-user-profile.js';
+import { registerUploadFileTool } from './tools/upload-file.js';
+import { registerDownloadAttachmentTool } from './tools/download-attachment.js';
 
-/** Build a configured McpServer with all eight tools registered against `app`. */
+/** Build a configured McpServer with all ten tools registered against `app`. */
 export function buildServer(app: App): McpServer {
   const server = new McpServer({ name: 'rocket-cli', version: '0.1.0' });
   registerListRoomsTool(server, app);
@@ -25,6 +27,8 @@ export function buildServer(app: App): McpServer {
   registerSendMessageTool(server, app);
   registerAddReactionTool(server, app);
   registerGetUserProfileTool(server, app);
+  registerUploadFileTool(server, app);
+  registerDownloadAttachmentTool(server, app);
   return server;
 }
 

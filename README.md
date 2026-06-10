@@ -46,6 +46,20 @@ node dist/cli.js search "deploy error" --room #dev --author jsmith --limit 10
 node dist/cli.js send #dev "Hello team"
 node dist/cli.js send #dev "Fixed in the next build" --thread <parent-message-id>
 
+# List threads in a room; show a specific thread
+node dist/cli.js threads general -n 10
+node dist/cli.js thread <parent-message-id>
+
+# Watch for messages matching a query (local FTS)
+node dist/cli.js watch "deploy error" --once
+node dist/cli.js watch "incident" --room #ops --interval 30
+
+# Upload a file to a room
+node dist/cli.js upload general /path/to/report.pdf --text "Q2 report"
+
+# Download an attachment (use the link from `messages` output: [file] name -> /file-upload/…)
+node dist/cli.js download /file-upload/abc123/report.pdf --out /tmp/report.pdf
+
 # Start the MCP stdio server (used by Claude Code / Claude Desktop)
 node dist/cli.js serve
 ```
@@ -87,6 +101,43 @@ node dist/cli.js serve
 |---|---|
 | `--thread <id>` | Reply to the thread with this parent message id |
 
+### `threads` flags
+
+| Flag | Description |
+|---|---|
+| `-n, --count <n>` | Number of threads to show (default 25) |
+| `--text <filter>` | Filter threads by parent message text |
+
+### `thread` flags
+
+| Flag | Description |
+|---|---|
+| `-n, --count <n>` | Number of replies to show (default 50) |
+
+### `watch` flags
+
+| Flag | Description |
+|---|---|
+| `--room <r>` | Limit to a specific room (default: all rooms) |
+| `--interval <sec>` | Poll interval in seconds (default 60) |
+| `--once` | Run a single pass over the last 24 h and exit |
+| `--notify <target>` | Post each match to this room or user |
+| `--log <path>` | Append matches as JSON lines to a file |
+
+### `upload` flags
+
+| Flag | Description |
+|---|---|
+| `--text <t>` | Caption message for the attachment |
+| `--thread <id>` | Attach inside the thread with this parent message id |
+| `--name <n>` | Override the uploaded file name |
+
+### `download` flags
+
+| Flag | Description |
+|---|---|
+| `--out <path>` | Where to save the file (default: `~/Downloads/<name>`) |
+
 ## MCP server for Claude Code
 
 Add to `.mcp.json` in your project root (or `~/.claude/mcp.json` for global):
@@ -115,7 +166,7 @@ See `.mcp.json.example` at the repo root for a copy-paste starting point.
 
 ## MCP tools
 
-Eight tools are exposed to the LLM agent:
+Ten tools are exposed to the LLM agent:
 
 | Tool | What it does | Key inputs |
 |---|---|---|
@@ -127,8 +178,12 @@ Eight tools are exposed to the LLM agent:
 | `send_message` | Post to a room or reply in a thread | `target` (#channel/@user/name/id), `text`, `threadId?` |
 | `add_reaction` | Add or remove an emoji reaction on a message | `messageId`, `emoji` (colon-wrapping optional), `remove?` (bool, default false) |
 | `get_user_profile` | Look up a user's profile by username or id | `user` (username with or without leading `@`, or user id) |
+| `upload_file` | Attach a local file to a room or thread | `room` (#channel/@user/name/id), `filePath` (absolute path), `text?` (caption), `threadId?`, `fileName?` |
+| `download_attachment` | Download a message attachment to local disk | `fileUrl` (attachment link after `->`, e.g. `/file-upload/…`), `savePath?` (default: `~/Downloads/<name>`) |
 
 `get_messages` and `list_threads` return an envelope with `room`, `syncedThrough`, and `coverage` so the agent knows the freshness and depth of the cached data. Thread parents in `get_messages` carry a `replyCount`; pass that message's `id` as `threadId` to `get_thread_messages`.
+
+Attachment links appear in `get_messages` output as `[file] name -> /file-upload/…`; pass the part after `->` as `fileUrl` to `download_attachment`.
 
 ## Architecture
 

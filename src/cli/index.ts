@@ -6,6 +6,10 @@ import { register as registerSync } from './commands/sync.js';
 import { register as registerMessages } from './commands/messages.js';
 import { register as registerSearch } from './commands/search.js';
 import { register as registerSend } from './commands/send.js';
+import { register as registerThreads } from './commands/threads.js';
+import { register as registerWatch } from './commands/watch.js';
+import { register as registerUpload } from './commands/upload.js';
+import { register as registerDownload } from './commands/download.js';
 
 const program = new Command();
 
@@ -21,5 +25,9 @@ registerSync(program);
 registerMessages(program);
 registerSearch(program);
 registerSend(program);
+registerThreads(program);
+registerWatch(program);
+registerUpload(program);
+registerDownload(program);
 
 program.parse(process.argv);

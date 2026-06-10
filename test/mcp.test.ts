@@ -171,15 +171,16 @@ describe('mcp server', () => {
     db?.close();
   });
 
-  it('lists exactly eight tools with readOnlyHint on the six read tools', async () => {
+  it('lists exactly ten tools with readOnlyHint on the six read tools', async () => {
     client = await connect(app);
     const { tools } = await client.listTools();
 
-    expect(tools).toHaveLength(8);
+    expect(tools).toHaveLength(10);
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
         'add_reaction',
+        'download_attachment',
         'get_messages',
         'get_thread_messages',
         'get_user_profile',
@@ -187,6 +188,7 @@ describe('mcp server', () => {
         'list_threads',
         'search_messages',
         'send_message',
+        'upload_file',
       ].sort(),
     );
 
