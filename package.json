@@ -16,7 +16,10 @@
     "build": "tsup",
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "seed": "tsx scripts/seed.ts",
+    "validate": "tsx scripts/validate.ts",
+    "validate:full": "npm run seed && npm run validate"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

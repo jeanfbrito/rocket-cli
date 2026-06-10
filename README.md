@@ -367,6 +367,54 @@ Attachment links appear in `get_messages` output as `[file] name -> /file-upload
 | `ROCKET_CLI_BACKFILL_LIMIT` | no | `500` | Max messages to fetch on initial room backfill |
 | `ROCKET_CLI_EMOJI_IMAGES` | no | `true` | Cache custom-emoji image bytes. `false`/`0` caches metadata only (no image fetch/storage) |
 
+## Validating against your own server
+
+rocket-cli's most important features — unread, mentions, threads, DM unreads — only
+have meaningful state when *other* users have generated activity for you. Your own
+messages never mark your own rooms unread or mention yourself. To exercise the tool
+end-to-end you need a realistic multi-user workspace.
+
+Two scripts under `scripts/` do this against any server where you hold an admin PAT:
+
+- **`scripts/seed.ts`** — creates four personas (`ana.dev`, `bruno.qa`, `carla.pm`,
+  `diego.ops`), public channels (`#engineering`, `#random`, `#incidents`), a private
+  group (`#leadership`), DMs and a multi-party DM to you, then posts a believable
+  conversation fabric *as those personas*: threads (incl. one mentioning you and a
+  30+ reply long thread), an edited message, a deleted message, an `@all`/`@here`
+  broadcast, file + image uploads, a custom-emoji reaction, a quote, rich-text and a
+  ~3000-char message, plus **negative** cases that must stay invisible to you (a
+  `#secret-ops` channel you are not in, and a persona↔persona DM). It is idempotent:
+  re-running checks-before-creating and will not duplicate content.
+- **`scripts/validate.ts`** — the automated true-usage test. It runs the built CLI
+  with an isolated temp cache (`ROCKET_CLI_DB`), cold-syncs every room, then asserts
+  the seeded state surfaces correctly: attention shows the mentions / DM unreads /
+  unread thread, `unread` lists the seeded rooms, `mentions` finds 3+, `search`
+  hits thread content, `thread` reads the long thread fully, `open` resolves a
+  permalink with reply affordances, the edited text is reflected, the deleted message
+  is gone, and the negative cases never leak. Each assertion prints a pass/fail line;
+  the script exits non-zero on any failure.
+  - **Sidebar parity:** on a default-config server (`Unread_Count =
+    user_and_group_mentions_only`) a plain-chatter channel sets `alert: true` but
+    `unread: 0`; validate asserts such a channel (`#random`, no `@jean` mention) still
+    appears in `unread`/attention — flagged `activityOnly` — instead of being dropped.
+
+> [!WARNING]
+> **Use a disposable / personal test server only.** `seed.ts` CREATES users and rooms
+> and posts messages. Never run it against a production or shared workspace. It reads
+> the same `.env` as the CLI and requires the configured account to be an **admin**.
+
+```bash
+# requires: a built CLI (npm run build) + admin PAT in .env
+npm run seed        # create the multi-user state (idempotent)
+npm run validate    # cold-sync into a temp cache and assert everything
+npm run validate:full   # both, back to back
+```
+
+Persona passwords are generated once and stored in `scripts/.seed-credentials.json`
+(gitignored, mode 0600); the path and password are printed to **stderr** only, never
+to stdout. The scripts live outside the `src` tsconfig rootDir; typecheck them with
+`npx tsc --noEmit --strict --module NodeNext --moduleResolution NodeNext --target ES2022 --skipLibCheck --types node scripts/*.ts`.
+
 ## Known issues
 
 See [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
