@@ -262,5 +262,8 @@ export function subscriptionToRoomRow(sub: RcWireSubscription): RoomRow {
     sub_updated_at: toIso(sub._updatedAt),
     ls: toIso(sub.ls as RcDate),
     tunread: JSON.stringify(tunread),
+    // `alert` is the sidebar Unread flag; map the optional boolean to 0|1 for
+    // the INTEGER column (default 0 when the wire omits it).
+    alert: sub.alert ? 1 : 0,
   };
 }

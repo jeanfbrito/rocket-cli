@@ -15,6 +15,7 @@ function room(rid: string, over: Partial<RoomRow> = {}): RoomRow {
     oldest_loaded_ts: null,
     fully_backfilled: 0,
     sub_updated_at: null,
+    alert: 0,
     ...over,
   };
 }
@@ -64,7 +65,7 @@ function ftsRowids(db: Db, query: string): number[] {
 describe('migrations', () => {
   it('migrates a :memory: db cleanly and sets schema_version', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('5');
+    expect(db.getMeta('schema_version')).toBe('6');
     const tables = (
       db.conn
         .prepare(
@@ -87,7 +88,7 @@ describe('migrations', () => {
 
   it('v4 adds ls + tunread columns to rooms', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('5');
+    expect(db.getMeta('schema_version')).toBe('6');
     const cols = (
       db.conn.prepare('PRAGMA table_info(rooms)').all() as { name: string }[]
     ).map((c) => c.name);
@@ -95,9 +96,22 @@ describe('migrations', () => {
     db.close();
   });
 
+  it('v6 adds an alert column to rooms, defaulting to 0', () => {
+    const db = openDb(':memory:');
+    expect(db.getMeta('schema_version')).toBe('6');
+    const cols = (
+      db.conn.prepare('PRAGMA table_info(rooms)').all() as { name: string }[]
+    ).map((c) => c.name);
+    expect(cols).toContain('alert');
+    // A room inserted without an explicit alert defaults to 0.
+    db.upsertRoom(room('r1', { alert: undefined }));
+    expect(db.getRoom('r1')?.alert).toBe(0);
+    db.close();
+  });
+
   it('v5 adds a mentions column + partial index, defaulting to []', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('5');
+    expect(db.getMeta('schema_version')).toBe('6');
 
     const cols = (
       db.conn.prepare('PRAGMA table_info(messages)').all() as { name: string }[]
@@ -146,7 +160,7 @@ describe('migrations', () => {
 
       const db2 = openDb(path);
       // Still at the latest version, prior data preserved → no destructive re-run.
-      expect(db2.getMeta('schema_version')).toBe('5');
+      expect(db2.getMeta('schema_version')).toBe('6');
       expect(db2.getMeta('instance_url')).toBe('https://example.com');
       db2.close();
     } finally {
@@ -441,12 +455,13 @@ describe('repository', () => {
 
   it('ls/tunread update on subscription re-upsert but sync watermarks survive', () => {
     db = openDb(':memory:');
-    // Initial subscription state: read marker + one unread thread.
+    // Initial subscription state: read marker + one unread thread + alert set.
     db.upsertRoom(
       room('r1', {
         unread: 2,
         ls: '2026-06-10T08:00:00.000Z',
         tunread: '["p1"]',
+        alert: 1,
       }),
     );
     // Sync engine sets watermarks independently.
@@ -462,6 +477,7 @@ describe('repository', () => {
         unread: 0,
         ls: '2026-06-10T12:00:00.000Z',
         tunread: '[]',
+        alert: 0,
       }),
     );
     const r = db.getRoom('r1');
@@ -469,20 +485,26 @@ describe('repository', () => {
     expect(r?.ls).toBe('2026-06-10T12:00:00.000Z');
     expect(r?.tunread).toBe('[]');
     expect(r?.unread).toBe(0);
+    // `alert` is subscription-sourced too: it clears on conflict when read.
+    expect(r?.alert).toBe(0);
     // Sync watermarks preserved (NOT in the ON CONFLICT SET list).
     expect(r?.last_synced_at).toBe('2026-06-10T10:00:00.000Z');
     expect(r?.oldest_loaded_ts).toBe('2026-06-01T00:00:00.000Z');
     expect(r?.fully_backfilled).toBe(1);
   });
 
-  it('findUnreadRooms returns rooms with unread > 0 OR non-empty tunread', () => {
+  it('findUnreadRooms returns rooms with unread > 0 OR alert OR non-empty tunread', () => {
     db = openDb(':memory:');
     db.upsertRooms([
-      room('read', { name: 'read', unread: 0, tunread: '[]' }),
-      room('hasUnread', { name: 'hasUnread', unread: 3, tunread: '[]' }),
-      room('hasThread', { name: 'hasThread', unread: 0, tunread: '["p1"]' }),
+      room('read', { name: 'read', unread: 0, tunread: '[]', alert: 0 }),
+      room('hasUnread', { name: 'hasUnread', unread: 3, tunread: '[]', alert: 0 }),
+      room('hasThread', { name: 'hasThread', unread: 0, tunread: '["p1"]', alert: 0 }),
+      // Plain unread message on a mentions-only server: count stays 0, no
+      // thread, only the sidebar `alert` flag flips. Must still be surfaced.
+      room('alertOnly', { name: 'alertOnly', unread: 0, tunread: '[]', alert: 1 }),
     ]);
     expect(db.findUnreadRooms().map((r) => r.rid).sort()).toEqual([
+      'alertOnly',
       'hasThread',
       'hasUnread',
     ]);

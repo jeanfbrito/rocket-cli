@@ -269,7 +269,7 @@ describe('rowToCompactWithLink', () => {
 });
 
 describe('subscriptionToRoomRow', () => {
-  it('maps rid/name/fname/t/unread, sub_updated_at, ls and tunread', () => {
+  it('maps rid/name/fname/t/unread, sub_updated_at, ls, tunread and alert', () => {
     const row = subscriptionToRoomRow({
       rid: RID,
       name: 'general',
@@ -279,6 +279,7 @@ describe('subscriptionToRoomRow', () => {
       _updatedAt: TS,
       ls: TS,
       tunread: ['p1', 'p2'],
+      alert: true,
     } as RcWireSubscription);
     expect(row).toEqual({
       rid: RID,
@@ -289,15 +290,28 @@ describe('subscriptionToRoomRow', () => {
       sub_updated_at: TS,
       ls: TS,
       tunread: '["p1","p2"]',
+      alert: 1,
     });
   });
 
-  it('defaults unread to 0, missing dates to null, and tunread to "[]"', () => {
+  it('maps alert:true -> 1 even when the unread count is 0 (mentions-only)', () => {
+    const row = subscriptionToRoomRow({
+      rid: RID,
+      t: 'c',
+      unread: 0,
+      alert: true,
+    } as RcWireSubscription);
+    expect(row.unread).toBe(0);
+    expect(row.alert).toBe(1);
+  });
+
+  it('defaults unread to 0, missing dates to null, tunread to "[]", alert to 0', () => {
     const row = subscriptionToRoomRow({ rid: RID, t: 'd' } satisfies RcWireSubscription);
     expect(row.unread).toBe(0);
     expect(row.sub_updated_at).toBeNull();
     expect(row.name).toBeNull();
     expect(row.ls).toBeNull();
     expect(row.tunread).toBe('[]');
+    expect(row.alert).toBe(0);
   });
 });

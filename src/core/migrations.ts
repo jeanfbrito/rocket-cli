@@ -235,6 +235,29 @@ export const MIGRATIONS: Migration[] = [
       `CREATE INDEX idx_messages_mentions ON messages (rid, ts DESC) WHERE mentions != '[]';`,
     ],
   },
+  {
+    // v6 — per-room `alert` flag mirrored from ISubscription.alert, so the
+    // read-only `unread` command / `get_unread` tool lists exactly the rooms the
+    // Rocket.Chat sidebar shows under its "Unread" section.
+    //
+    // WHY this is needed: the sidebar groups a room as Unread when
+    // `room.alert || room.unread || room.tunread?.length` (see
+    // apps/meteor/client/sidebar/hooks/useRoomList.ts). The server sets
+    // `alert: true` on EVERY new message for each other member
+    // (Subscriptions.setAlertForRoomIdExcludingUserId in notifyUsersOnMessage),
+    // but only increments `unread` when the room's Unread_Count setting is
+    // 'all_messages'. The DEFAULT Unread_Count is 'user_and_group_mentions_only',
+    // so a plain (non-mention) channel/group message leaves `unread: 0` while
+    // `alert: true`. Our prior predicate (unread > 0 OR tunread != '[]') missed
+    // every such room — the exact gap a busy account hits. `alert` is cleared
+    // (set false) when the user reads the room (Subscriptions.setAsRead...), so
+    // it tracks "touched since last read" reliably.
+    //
+    // INTEGER 0|1 (SQLite has no boolean), NOT NULL DEFAULT 0 so existing rows
+    // and re-upserts that omit it stay well-defined.
+    version: 6,
+    statements: [`ALTER TABLE rooms ADD COLUMN alert INTEGER NOT NULL DEFAULT 0;`],
+  },
 ];
 
 /** Highest schema version defined by the migration set. */

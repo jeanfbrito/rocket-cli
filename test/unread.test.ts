@@ -227,6 +227,68 @@ describe('collectUnread', () => {
     expect(r.messages.map((m) => m.id)).toEqual(['m2', 'm3']);
   });
 
+  it('lists an alert-only room (unread=0, alert=true) sliced by ls', async () => {
+    // Reproduces the real bug: on a server whose Unread_Count is the default
+    // 'user_and_group_mentions_only', a plain channel message leaves unread=0
+    // and tunread=[] but flips the sidebar `alert` flag. The room must still
+    // appear, sliced exactly by the last-read watermark, and be flagged
+    // activityOnly so the count can be labeled honestly.
+    const ls = '2026-06-10T12:00:00.000Z';
+    rc.onSubscriptions({
+      update: [
+        sub({ rid: 'C1', name: 'general', t: 'c', unread: 0, alert: true, tunread: [], ls }),
+      ],
+      remove: [],
+    });
+    seedRoom(db, 'C1');
+    db.upsertMessages([
+      { id: 'old', rid: 'C1', author_id: 'u1', author_username: 'alice', author_name: 'Alice', text: 'already read', ts: '2026-06-10T11:00:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+      { id: 'new1', rid: 'C1', author_id: 'u2', author_username: 'bob', author_name: 'Bob', text: 'plain unread message', ts: '2026-06-10T13:00:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+    ]);
+
+    const report = await collectUnread(app);
+
+    expect(report.rooms).toHaveLength(1);
+    const r = report.rooms[0]!;
+    expect(r.room.name).toBe('general');
+    expect(r.unreadCount).toBe(0);
+    expect(r.activityOnly).toBe(true);
+    expect(r.approximate).toBe(false);
+    // Sliced exactly by ls — only the message after the watermark.
+    expect(r.messages.map((m) => m.id)).toEqual(['new1']);
+  });
+
+  it('STALENESS REGRESSION: force-refreshes even when the cache is fresh', async () => {
+    // Seed a fresh refresh timestamp so a TTL-gated ensureFresh() would skip the
+    // network entirely. Pre-seed the cached room as fully read (unread=0,
+    // alert=0). collectUnread MUST still call getSubscriptions and pick up the
+    // changed server state — a 5-min-stale unread answer is wrong by design.
+    db.setMeta('rooms_refreshed_at', new Date().toISOString());
+    seedRoom(db, 'C1');
+    db.upsertRoom({
+      rid: 'C1', name: 'general', fname: 'general', t: 'c',
+      unread: 0, alert: 0, tunread: '[]', ls: '2026-06-10T12:00:00.000Z',
+      sub_updated_at: null,
+    });
+    db.upsertMessages([
+      { id: 'new1', rid: 'C1', author_id: 'u2', author_username: 'bob', author_name: 'Bob', text: 'arrived after last refresh', ts: '2026-06-10T13:00:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+    ]);
+    // Server now reports the room as alert-only unread, contradicting the cache.
+    rc.onSubscriptions({
+      update: [
+        sub({ rid: 'C1', name: 'general', t: 'c', unread: 0, alert: true, tunread: [], ls: '2026-06-10T12:00:00.000Z' }),
+      ],
+      remove: [],
+    });
+
+    const report = await collectUnread(app);
+
+    // Network was hit despite the fresh cache, and the room is now surfaced.
+    expect(rc.calls).toContain('getSubscriptions');
+    expect(report.rooms.map((r) => r.room.name)).toEqual(['general']);
+    expect(report.rooms[0]!.activityOnly).toBe(true);
+  });
+
   it('returns an empty report when everything is read (all caught up)', async () => {
     rc.onSubscriptions({
       update: [sub({ rid: 'C1', name: 'general', t: 'c', unread: 0, tunread: [] })],

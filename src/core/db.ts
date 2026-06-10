@@ -109,10 +109,10 @@ export class Db {
     this.stmtUpsertRoom = conn.prepare(
       `INSERT INTO rooms (
          rid, name, fname, t, unread, last_synced_at,
-         oldest_loaded_ts, fully_backfilled, sub_updated_at, ls, tunread
+         oldest_loaded_ts, fully_backfilled, sub_updated_at, ls, tunread, alert
        ) VALUES (
          @rid, @name, @fname, @t, @unread, @last_synced_at,
-         @oldest_loaded_ts, @fully_backfilled, @sub_updated_at, @ls, @tunread
+         @oldest_loaded_ts, @fully_backfilled, @sub_updated_at, @ls, @tunread, @alert
        )
        ON CONFLICT(rid) DO UPDATE SET
          name = excluded.name,
@@ -121,7 +121,8 @@ export class Db {
          unread = excluded.unread,
          sub_updated_at = excluded.sub_updated_at,
          ls = excluded.ls,
-         tunread = excluded.tunread`,
+         tunread = excluded.tunread,
+         alert = excluded.alert`,
     );
     this.stmtGetRoom = conn.prepare('SELECT * FROM rooms WHERE rid = ?');
 
@@ -185,6 +186,7 @@ export class Db {
           fully_backfilled: room.fully_backfilled ?? 0,
           ls: room.ls ?? null,
           tunread: room.tunread ?? '[]',
+          alert: room.alert ?? 0,
         });
     });
     this.txUpsertMessages = conn.transaction((rows: MessageRow[]) => {
@@ -235,6 +237,7 @@ export class Db {
       fully_backfilled: room.fully_backfilled ?? 0,
       ls: room.ls ?? null,
       tunread: room.tunread ?? '[]',
+      alert: room.alert ?? 0,
     });
   }
 
@@ -264,15 +267,20 @@ export class Db {
   }
 
   /**
-   * Rooms with anything unread: a positive unread count OR a non-empty tunread
-   * (unread thread replies even when the main-channel unread count is zero).
-   * Ordered by name for stable display. Read-only — never mutates read state.
+   * Rooms the Rocket.Chat sidebar shows under "Unread": a positive unread count,
+   * OR the `alert` flag set, OR a non-empty tunread (unread thread replies even
+   * when the main-channel unread count is zero). This mirrors the sidebar
+   * predicate `room.alert || room.unread || room.tunread?.length`
+   * (apps/meteor/client/sidebar/hooks/useRoomList.ts). The `alert` term is what
+   * surfaces rooms with plain unread messages on servers whose Unread_Count is
+   * the default 'user_and_group_mentions_only' (unread stays 0 there, only
+   * `alert` flips). Ordered by name for stable display. Read-only.
    */
   findUnreadRooms(): RoomRow[] {
     return this.conn
       .prepare(
         `SELECT * FROM rooms
-         WHERE unread > 0 OR (tunread IS NOT NULL AND tunread != '[]')
+         WHERE unread > 0 OR alert = 1 OR (tunread IS NOT NULL AND tunread != '[]')
          ORDER BY name`,
       )
       .all() as RoomRow[];

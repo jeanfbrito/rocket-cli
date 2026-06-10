@@ -52,6 +52,11 @@ export interface RoomRow {
   /** JSON array of thread-parent ids with unread replies, from
    *  ISubscription.tunread. Defaults to '[]'. From subscription. */
   tunread?: string;
+  /** Sidebar "Unread" flag (0|1) from ISubscription.alert. The server sets it
+   *  true on any new message and clears it on read; the unread view treats
+   *  alert=1 as unread even when the unread *count* is 0 (mentions-only servers).
+   *  Defaults to 0. From subscription. */
+  alert?: number;
 }
 
 /**

@@ -20,7 +20,11 @@ function printHuman(report: UnreadReport): void {
 
   for (const r of report.rooms) {
     const threadCount = r.unreadThreads.length;
-    const parts = [`${r.unreadCount} unread`];
+    // Activity-only rooms carry no server unread count (mentions-only server):
+    // label them by their actual sliced message count instead of "0 unread".
+    const parts = r.activityOnly
+      ? [`${r.messages.length} new (activity)`]
+      : [`${r.unreadCount} unread`];
     if (threadCount > 0) {
       parts.push(`${threadCount} ${threadCount === 1 ? 'thread' : 'threads'}`);
     }

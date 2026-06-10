@@ -33,8 +33,20 @@ export interface UnreadThread {
 
 export interface UnreadRoom {
   room: { id: string; name: string; type: 'channel' | 'group' | 'dm' };
-  /** The server's unread count for the room (subscription.unread). */
+  /** The server's unread count for the room (subscription.unread). On servers
+   *  whose Unread_Count is the default 'user_and_group_mentions_only' this stays
+   *  0 for plain (non-mention) activity even though the room is unread — see
+   *  `activityOnly`. */
   unreadCount: number;
+  /**
+   * True when the room is surfaced only by its sidebar `alert` flag: the server
+   * unread *count* is 0 and there are no unread threads, but the room was
+   * touched since the last read (e.g. a plain channel message on a
+   * mentions-only server). The sliced `messages` are still the exact messages
+   * after the last-read watermark; the count is just not maintained by the
+   * server. Lets the UI label these honestly instead of printing "0 unread".
+   */
+  activityOnly: boolean;
   /**
    * Whether `messages` was sliced exactly (ts > ls) or approximated. When the
    * room has no last-read watermark (`ls` is null — never opened), we fall back
@@ -76,7 +88,9 @@ function parseTunread(raw: string | undefined): string[] {
  * Pipeline per call:
  *   1. rooms.refresh() — force-pull fresh subscriptions (bypass the 5-min TTL);
  *      unread state is the entire point, so we always want the latest watermarks.
- *   2. db.findUnreadRooms() — rooms with unread > 0 OR a non-empty tunread.
+ *   2. db.findUnreadRooms() — rooms with unread > 0 OR alert OR a non-empty
+ *      tunread (mirrors the RC sidebar "Unread" predicate; `alert` catches plain
+ *      unread messages that don't bump the count on mentions-only servers).
  *   3. per room: ensureRoomSynced(rid), then slice ts > ls (exact) or newest-N
  *      (approximate, when ls is null) from the local timeline.
  *   4. per unread thread parent: ensureThreadLoaded(parent), then slice replies
@@ -124,6 +138,13 @@ async function collectRoom(
 
   const ls = room.ls ?? null;
   const approximate = ls == null;
+  // Activity-only: the room shows up purely on its sidebar `alert` flag — the
+  // server keeps no unread count for it (mentions-only Unread_Count) and there
+  // are no unread threads. We still slice the real messages after `ls`, but the
+  // numeric count is not meaningful, so surface a flag for honest labeling.
+  const parentIdsForFlag = parseTunread(room.tunread);
+  const activityOnly =
+    room.unread === 0 && (room.alert ?? 0) === 1 && parentIdsForFlag.length === 0;
 
   // Exact: messages strictly newer than the last-read watermark. getTimeline
   // returns DESC (newest first); reverse for chronological display.
@@ -140,7 +161,7 @@ async function collectRoom(
 
   const unreadThreads: UnreadThread[] = [];
   if (includeThreads) {
-    const parentIds = parseTunread(room.tunread);
+    const parentIds = parentIdsForFlag;
     for (const tmid of parentIds) {
       const parent = await app.sync.ensureThreadLoaded(tmid);
       // Unread replies: ts > ls when we have a watermark, else all loaded
@@ -161,6 +182,7 @@ async function collectRoom(
       type: roomTypeLabel(room.t),
     },
     unreadCount: room.unread,
+    activityOnly,
     approximate,
     messages,
     unreadThreads,
