@@ -13,6 +13,7 @@ export function register(program: Command): void {
         target: string,
         textParts: string[],
         opts: { thread?: string; json?: boolean },
+        command: Command,
       ) => {
         await withApp(async (app) => {
           const text = textParts.join(' ');
@@ -28,7 +29,7 @@ export function register(program: Command): void {
             threadId: opts.thread,
           });
 
-          if (opts.json) {
+          if (command.optsWithGlobals<{ json?: boolean }>().json) {
             process.stdout.write(JSON.stringify(compact) + '\n');
             return;
           }

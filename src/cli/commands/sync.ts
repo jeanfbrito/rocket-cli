@@ -12,6 +12,7 @@ export function register(program: Command): void {
       async (
         room: string | undefined,
         opts: { all?: boolean; force?: boolean; json?: boolean },
+        command: Command,
       ) => {
         await withApp(async (app) => {
           if (!room && !opts.all) {
@@ -29,7 +30,7 @@ export function register(program: Command): void {
               .prepare('SELECT COUNT(*) AS n FROM messages WHERE rid = ? AND deleted = 0')
               .get(roomRow.rid) as { n: number };
 
-            if (opts.json) {
+            if (command.optsWithGlobals<{ json?: boolean }>().json) {
               process.stdout.write(
                 JSON.stringify({ room: roomRow.name ?? roomRow.rid, messages: count.n }) + '\n',
               );
@@ -65,7 +66,7 @@ export function register(program: Command): void {
             }
           }
 
-          if (opts.json) {
+          if (command.optsWithGlobals<{ json?: boolean }>().json) {
             process.stdout.write(
               JSON.stringify({ synced, errors, rooms: summaries }) + '\n',
             );

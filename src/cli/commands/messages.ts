@@ -14,6 +14,7 @@ export function register(program: Command): void {
       async (
         room: string,
         opts: { count: string; before?: string; includeSystem?: boolean; json?: boolean },
+        command: Command,
       ) => {
         await withApp(async (app) => {
           const count = Math.max(1, parseInt(opts.count, 10) || 30);
@@ -40,7 +41,7 @@ export function register(program: Command): void {
           // getTimeline returns DESC (newest first); reverse for human display.
           const ordered = [...rows].reverse();
 
-          if (opts.json) {
+          if (command.optsWithGlobals<{ json?: boolean }>().json) {
             const compact = ordered.map((r) => rowToCompact(r));
             process.stdout.write(JSON.stringify(compact) + '\n');
             return;

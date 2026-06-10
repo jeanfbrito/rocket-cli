@@ -8,7 +8,7 @@ export function register(program: Command): void {
     .option('--type <type>', 'filter by room type: c, p, d, channel, group, dm')
     .option('--filter <substr>', 'filter by name substring')
     .option('--json', 'output as JSON array')
-    .action(async (opts: { type?: string; filter?: string; json?: boolean }) => {
+    .action(async (opts: { type?: string; filter?: string; json?: boolean }, command: Command) => {
       await withApp(async (app) => {
         // Normalize shorthand type aliases.
         let type = opts.type;
@@ -21,7 +21,7 @@ export function register(program: Command): void {
           nameLike: opts.filter,
         });
 
-        if (opts.json) {
+        if (command.optsWithGlobals<{ json?: boolean }>().json) {
           process.stdout.write(JSON.stringify(rooms) + '\n');
           return;
         }

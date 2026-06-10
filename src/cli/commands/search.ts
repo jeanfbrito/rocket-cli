@@ -13,6 +13,7 @@ export function register(program: Command): void {
       async (
         query: string,
         opts: { room?: string; author?: string; limit: string; json?: boolean },
+        command: Command,
       ) => {
         await withApp(async (app) => {
           const limit = Math.max(1, parseInt(opts.limit, 10) || 20);
@@ -28,7 +29,7 @@ export function register(program: Command): void {
             limit,
           });
 
-          if (opts.json) {
+          if (command.optsWithGlobals<{ json?: boolean }>().json) {
             process.stdout.write(JSON.stringify(result) + '\n');
             return;
           }
