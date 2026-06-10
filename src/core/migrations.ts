@@ -107,6 +107,62 @@ export const MIGRATIONS: Migration[] = [
       END;`,
     ],
   },
+  {
+    // v2 — fix: the v1 UPDATE triggers fired their delete-half + insert-half on
+    // EVERY update, including no-op re-upserts of identical content. Delta sync
+    // (chat.syncMessages with lastUpdate) re-fetches and re-upserts already-known
+    // rows on every sync, so any message synced more than once hit this path.
+    //
+    // For an FTS5 external-content table, issuing 'delete'(old tokens) and then
+    // INSERT(identical tokens) for the same rowid in the same statement corrupts
+    // the term posting list: the doc-frequency accounting nets to zero and the
+    // row's terms become unsearchable, while 'integrity-check' still passes (it
+    // only validates existing index entries, not missing ones). Symptom: a
+    // freshly-synced message is in messages_fts by rowid but MATCH finds nothing.
+    //
+    // Fix: fire the delete-half / insert-half only when the indexed content
+    // (text or author_username) actually changed, or the deleted flag flipped.
+    // Identical re-upserts then leave the index untouched. Edit (0->0 with new
+    // text), soft-delete (0->1), and undelete (1->0) all still re-index correctly.
+    // We also rebuild the index once so DBs that were already desynced recover.
+    version: 2,
+    statements: [
+      `DROP TRIGGER IF EXISTS messages_au_del;`,
+      `DROP TRIGGER IF EXISTS messages_au_ins;`,
+
+      // UPDATE delete-half: evict OLD indexed values only when the row was
+      // indexed (old.deleted = 0) AND the indexed content is actually leaving
+      // the index — i.e. the row is being soft-deleted, or its text/author
+      // changed. `IS NOT` (not `<>`) so a NULL author is compared correctly.
+      `CREATE TRIGGER messages_au_del AFTER UPDATE ON messages
+       WHEN old.deleted = 0 AND (
+         new.deleted = 1
+         OR new.text IS NOT old.text
+         OR new.author_username IS NOT old.author_username
+       ) BEGIN
+        INSERT INTO messages_fts (messages_fts, rowid, text, author_username)
+        VALUES ('delete', old.rowid, old.text, old.author_username);
+      END;`,
+
+      // UPDATE insert-half: (re)index NEW values only when the row should be
+      // indexed (new.deleted = 0) AND the indexed content is actually entering
+      // or changing — i.e. the row is being undeleted, or its text/author
+      // changed. Together with messages_au_del this leaves identical re-upserts
+      // a no-op while still handling edit / soft-delete / undelete.
+      `CREATE TRIGGER messages_au_ins AFTER UPDATE ON messages
+       WHEN new.deleted = 0 AND (
+         old.deleted = 1
+         OR new.text IS NOT old.text
+         OR new.author_username IS NOT old.author_username
+       ) BEGIN
+        INSERT INTO messages_fts (rowid, text, author_username)
+        VALUES (new.rowid, new.text, new.author_username);
+      END;`,
+
+      // Repair any index already corrupted by the v1 triggers.
+      `INSERT INTO messages_fts(messages_fts) VALUES('rebuild');`,
+    ],
+  },
 ];
 
 /** Highest schema version defined by the migration set. */

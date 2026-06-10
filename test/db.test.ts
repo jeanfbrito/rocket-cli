@@ -64,7 +64,7 @@ function ftsRowids(db: Db, query: string): number[] {
 describe('migrations', () => {
   it('migrates a :memory: db cleanly and sets schema_version', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('1');
+    expect(db.getMeta('schema_version')).toBe('2');
     const tables = (
       db.conn
         .prepare(
@@ -87,8 +87,8 @@ describe('migrations', () => {
       db1.close();
 
       const db2 = openDb(path);
-      // Still version 1, prior data preserved → no destructive re-run.
-      expect(db2.getMeta('schema_version')).toBe('1');
+      // Still at the latest version, prior data preserved → no destructive re-run.
+      expect(db2.getMeta('schema_version')).toBe('2');
       expect(db2.getMeta('instance_url')).toBe('https://example.com');
       db2.close();
     } finally {
@@ -155,6 +155,50 @@ describe('repository', () => {
 
     // External-content integrity must hold after the delete+reinsert cycle.
     expect(() => db.conn.exec("INSERT INTO messages_fts(messages_fts) VALUES('integrity-check')")).not.toThrow();
+  });
+
+  it('identical re-upsert keeps the row searchable (delta sync no-op path)', () => {
+    // Regression for the dogfood FTS miss: chat.syncMessages on this server
+    // (lastUpdate path, envelope { result: { updated, deleted } } with NO
+    // cursor) returns ALL updates in one page, and delta sync re-upserts
+    // already-known rows on every sync. The v1 UPDATE triggers fired
+    // delete(old)+insert(new) even when content was identical, which corrupts
+    // the FTS5 external-content posting list and silently makes the row
+    // unsearchable (integrity-check still passes). v2 guards the triggers on
+    // content actually changing.
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    // Mirrors the real captured shape: "rocket-cli dogfood: thread parent ...".
+    db.upsertMessages([msg('m1', { text: 'rocket-cli dogfood thread parent' })]);
+    expect(ftsIds(db, 'dogfood')).toContain('m1');
+
+    // Re-upsert identical content twice (what `sync --force` does repeatedly).
+    db.upsertMessages([msg('m1', { text: 'rocket-cli dogfood thread parent' })]);
+    db.upsertMessages([msg('m1', { text: 'rocket-cli dogfood thread parent' })]);
+
+    expect(ftsIds(db, 'dogfood')).toContain('m1');
+    expect(ftsIds(db, 'parent')).toContain('m1');
+    expect(() =>
+      db.conn.exec("INSERT INTO messages_fts(messages_fts) VALUES('integrity-check')"),
+    ).not.toThrow();
+  });
+
+  it('updating a non-indexed column does not desync the FTS index', () => {
+    // Delta re-upserts also carry tcount/tlm bumps on thread parents. Those
+    // columns are not in the FTS index; touching them must not perturb the
+    // term posting list for the row's text.
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    db.upsertMessages([msg('p1', { text: 'unique thread parent body', tcount: null })]);
+    expect(ftsIds(db, 'unique')).toContain('p1');
+
+    // Same text/author, only tcount/tlm change (the parent gained a reply).
+    db.upsertMessages([
+      msg('p1', { text: 'unique thread parent body', tcount: 2, tlm: '2026-06-10T16:00:00.000Z' }),
+    ]);
+
+    expect(ftsIds(db, 'unique')).toContain('p1');
+    expect(db.getMessage('p1')?.tcount).toBe(2);
   });
 
   it('undelete re-indexes without corrupting external content', () => {

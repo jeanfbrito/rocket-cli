@@ -3,6 +3,7 @@
 ## External VACUUM corrupts the FTS index
 
 - **Status**: by design (SQLite limitation), low risk in normal use
+- **Related (fixed)**: schema v1 had a sibling desync — identical re-upserts from delta sync fired delete+insert FTS trigger pairs that corrupted the posting list for unchanged rows. Schema v2 guards the triggers on actual content change and rebuilds the index on migration.
 - **What**: `messages_fts` is an FTS5 external-content table keyed by `messages.rowid`. `VACUUM` can renumber rowids, silently desyncing the search index. The tool itself never runs VACUUM (WAL mode, auto-vacuum off), so this only happens if you run `sqlite3 cache.db 'VACUUM'` manually.
 - **Workaround**: after any manual VACUUM, rebuild the index:
   ```sql
