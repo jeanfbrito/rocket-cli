@@ -1,7 +1,41 @@
 import { z } from 'zod';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+
+/**
+ * Parse and load a .env file from `dir` into process.env.
+ * Existing environment variables are never overwritten (real env wins).
+ * Silent no-op when the file is missing or unreadable.
+ */
+export function loadDotEnv(dir: string): void {
+  let text: string;
+  try {
+    text = readFileSync(join(dir, '.env'), 'utf8');
+  } catch {
+    return;
+  }
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    if (!key) continue;
+    let value = trimmed.slice(eq + 1).trim();
+    // Strip optional surrounding single or double quotes
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    // Never overwrite vars already set in the environment
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  }
+}
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -32,6 +66,7 @@ function defaultDbPath(): string {
 }
 
 export function loadConfig(): Config {
+  loadDotEnv(process.cwd());
   const raw = {
     url: process.env['ROCKETCHAT_URL'] ?? '',
     token: process.env['ROCKETCHAT_TOKEN'] ?? '',

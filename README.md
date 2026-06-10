@@ -4,19 +4,42 @@ Rocket.Chat bridge with a local SQLite/FTS5 cache — CLI for humans, MCP server
 
 On first read a room is backfilled (up to 500 messages / 30 days). Subsequent reads hit `chat.syncMessages` for deltas (60 s TTL), then serve from SQLite — zero network on cache-fresh rooms. Full-text search runs across all cached rooms locally via FTS5; when scoped to a room it falls back to the server and ingests the results into the cache.
 
-## Setup
+## Install
 
 **Requirements**: Node >= 20, `npm`
 
 ```sh
+git clone <repo-url>   # or your fork/path
+cd rocket-cli
 npm install
 npm run build
-cp .env.example .env
+npm link               # optional: puts `rocket-cli` on your PATH
 ```
 
-Edit `.env` with your Rocket.Chat URL and credentials. See [Environment variables](#environment-variables) below.
+After `npm link`, examples below can use `rocket-cli` instead of `node dist/cli.js`.
 
-**Create a Personal Access Token** in Rocket.Chat: My Account → Personal Access Tokens → Add. Enable **Ignore Two Factor Authentication** to avoid 2FA prompts on every API call.
+## Get your credentials
+
+1. Open Rocket.Chat in your browser → click your avatar (top-left) → **My Account** → **Personal Access Tokens**
+2. If the section is missing: an admin must enable the `API_Enable_Personal_Access_Tokens` setting, and your role needs the `create-personal-access-tokens` permission
+3. Name the token (e.g. `rocket-cli`), check **Ignore Two Factor Authentication** (without it, API calls may demand TOTP codes the CLI cannot answer), then click **Add**
+4. Copy both the **token** and the **user ID** — they appear together in the same confirmation dialog, and the token is shown only once
+5. Copy the example env file and fill in your values:
+   ```sh
+   cp .env.example .env
+   ```
+   Set `ROCKETCHAT_URL`, `ROCKETCHAT_TOKEN`, and `ROCKETCHAT_USER_ID`. The CLI auto-loads `.env` from the directory you run it in; real environment variables always take precedence.
+
+## Quickstart
+
+```sh
+rocket-cli rooms        # lists rooms you're subscribed to — verifies auth
+rocket-cli sync --all   # initial backfill into the local cache
+rocket-cli messages general -n 20
+rocket-cli search "deploy"
+```
+
+Cache reset: `rm ~/.local/share/rocket-cli/cache.db*` — next run re-syncs from the server.
 
 ## CLI usage
 
@@ -163,6 +186,18 @@ Use `${VARIABLE}` env-expansion so the token is read from your shell environment
 For Claude Desktop, add an equivalent entry under `mcpServers` in `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) with the same `command`/`args`/`env` structure.
 
 See `.mcp.json.example` at the repo root for a copy-paste starting point.
+
+**CLI alternative** — register with the `claude` CLI instead of editing `.mcp.json` manually:
+
+```sh
+claude mcp add rocketchat \
+  -e ROCKETCHAT_URL=https://chat.example.com \
+  -e ROCKETCHAT_TOKEN=your-token \
+  -e ROCKETCHAT_USER_ID=your-user-id \
+  -- node /absolute/path/to/rocket-cli/dist/cli.js serve
+```
+
+The `-e` flag sets env vars scoped to this MCP server; they are not exported to your shell. Run `claude mcp add --help` for scope and transport options.
 
 ## MCP tools
 
