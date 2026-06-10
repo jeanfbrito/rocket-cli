@@ -4,6 +4,10 @@ Rocket.Chat bridge with a local SQLite/FTS5 cache — CLI for humans, MCP server
 
 On first read a room is backfilled (up to 500 messages / 30 days). Subsequent reads hit `chat.syncMessages` for deltas (60 s TTL), then serve from SQLite — zero network on cache-fresh rooms. Full-text search runs across all cached rooms locally via FTS5; when scoped to a room it falls back to the server and ingests the results into the cache.
 
+## What needs my attention
+
+The headline feature: one call answers "what did I miss?". `get_attention` (MCP) / `rocket-cli attention` (CLI) fuses mentions of you, unread DMs, unread thread replies, and unread channel messages into a single prioritized, deduplicated digest — a message that both mentions you and is unread appears once, in the mentions section, flagged `alsoUnread`. Every item carries a clickable Rocket.Chat link, and the whole flow is strictly read-only (it never clears a single unread badge). Paste any of those links back to the agent via `open_url` (or `rocket-cli open <url>`) and you get the surrounding conversation plus the ids needed to reply — a full triage-to-reply round-trip without leaving the chat.
+
 ## Install
 
 **Requirements**: Node >= 20, `npm`
@@ -60,6 +64,25 @@ node dist/cli.js sync --all --force   # bypass TTL, re-fetch everything
 node dist/cli.js messages #dev -n 50
 node dist/cli.js messages #dev -n 20 --before 2026-06-01T00:00:00.000Z
 
+# Show everything unread since you last read each room (read-only — never clears badges)
+node dist/cli.js unread
+node dist/cli.js unread --limit 20 --no-threads
+
+# One-call triage: mentions + unread DMs + threads + channels, prioritized & deduplicated
+node dist/cli.js attention
+node dist/cli.js attention --since-days 2 --limit 20 --all-broadcasts
+
+# Just the messages that mention you, across all cached rooms (read-only)
+node dist/cli.js mentions
+node dist/cli.js mentions --since-days 14 --all-broadcasts
+
+# Show the conversation around a message id (from search, mentions, or a link)
+node dist/cli.js context <message-id>
+node dist/cli.js context <message-id> --before 20 --after 10
+
+# Paste any Rocket.Chat web link to open its content + how to reply
+node dist/cli.js open "https://chat.example.com/channel/general?msg=<id>"
+
 # Full-text search (cross-room by default)
 node dist/cli.js search "deploy error"
 node dist/cli.js search "deploy error" --room #dev
@@ -115,6 +138,50 @@ node dist/cli.js serve
 | `-n, --count <n>` | Number of messages to show (default 30) |
 | `--before <ISO>` | Show messages older than this ISO 8601 timestamp |
 | `--include-system` | Include system messages (joins, topic changes, etc.) |
+
+### `unread` flags
+
+Read-only: lists messages with `ts` newer than each room's server-side last-read watermark (the marker the UI sets when you open a room). It never calls `subscriptions.read` and never clears unread badges. Rooms with no read marker fall back to a newest-N approximation, flagged in the output.
+
+| Flag | Description |
+|---|---|
+| `--limit <n>` | Max messages per room (default 50) |
+| `--no-threads` | Skip unread thread replies (threads shown by default) |
+
+### `attention` flags
+
+Read-only one-call triage. Runs the mentions and unread views, then fuses them into prioritized sections — `MENTIONS`, `DIRECT MESSAGES`, `THREADS`, `CHANNELS` — deduplicated by message id (a mentioned message that is also unread is shown once, under mentions, flagged `also unread`). Every item carries a clickable link. Never clears a badge.
+
+| Flag | Description |
+|---|---|
+| `--since-days <n>` | How far back to look for mentions, in days (default 7) |
+| `--limit <n>` | Max items per section (default 30) |
+| `--all-broadcasts` | Also include channel-wide @all/@here mentions |
+
+### `mentions` flags
+
+| Flag | Description |
+|---|---|
+| `--since-days <n>` | How far back to look, in days (default 7) |
+| `--limit <n>` | Max total mentions to show (default 50) |
+| `--all-broadcasts` | Also include channel-wide @all/@here mentions |
+
+### `context` flags
+
+| Flag | Description |
+|---|---|
+| `<messageId>` | The message to center the conversation on |
+| `--before <n>` | Messages to show before the target (0-50, default 10) |
+| `--after <n>` | Messages to show after the target (0-50, default 5) |
+
+### `open` flags
+
+Paste any Rocket.Chat web link — a message, a thread, or a plain channel — and `open` resolves it, prints the surrounding conversation (target marked `→`), and shows how to reply.
+
+| Flag | Description |
+|---|---|
+| `<url>` | Any Rocket.Chat link: message, thread, or channel |
+| `-n, --count <n>` | Number of messages of context to show (default 20) |
 
 ### `search` flags
 
@@ -217,12 +284,17 @@ The `-e` flag sets env vars scoped to this MCP server; they are not exported to 
 
 ## MCP tools
 
-Twelve tools are exposed to the LLM agent:
+Seventeen tools are exposed to the LLM agent:
 
 | Tool | What it does | Key inputs |
 |---|---|---|
 | `list_rooms` | List subscribed channels, groups, and DMs | `filter?`, `type?` (channel/group/dm), `limit?` (default 50) |
 | `get_messages` | Read messages from a room, newest first | `room`, `count?` (default 30, max 100), `before?`, `after?` (ISO 8601), `includeSystem?` |
+| `get_attention` | One-call triage of everything needing attention — mentions, unread DMs, unread threads, unread channels, prioritized + deduplicated, every item linked (read-only) | `sinceDays?` (default 7, max 90), `limitPerSection?` (default 30, max 100), `includeChannelWide?` (default false) |
+| `get_unread` | List everything unread since you last read each room (read-only; never clears badges) | `limitPerRoom?` (default 50, max 100), `includeThreads?` (default true) |
+| `get_mentions` | Messages that mention the user (@username) across all cached rooms, each with a link (read-only) | `sinceDays?` (default 7, max 90), `limit?` (default 50, max 100), `includeChannelWide?` (default false) |
+| `get_message_context` | Show the conversation around a message id; thread replies pivot to their whole thread | `messageId`, `before?` (0-50, default 10), `after?` (0-50, default 5) |
+| `open_url` | Open any pasted Rocket.Chat link (message, thread, or channel) and return its content + the ids needed to reply/react | `url`, `count?` (1-100, default 20) |
 | `get_thread_messages` | Read a full thread (parent + replies) | `threadId` (parent message id), `count?` (default 50) |
 | `list_threads` | List active threads in a room by last activity | `room`, `count?` (default 25), `text?` (filter parent text) |
 | `search_messages` | Full-text search across all cached rooms | `query`, `room?` (scopes + enables server fallback), `author?`, `limit?` (default 20) |

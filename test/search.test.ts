@@ -153,6 +153,31 @@ describe('SearchService.search', () => {
     expect(hit.source).toBe('local');
   });
 
+  it('attaches a permalink to each hit when given a base URL and the room is cached', async () => {
+    db = openDb(':memory:');
+    seedRoom();
+    db.upsertMessages([msg('m1', { text: 'the deployment pipeline broke today' })]);
+
+    const { rc } = fakeRc();
+    const svc = new SearchService(db, rc, fakeSync(), 'http://example.com');
+    const res = await svc.search('deployment', { room: room('r1') });
+
+    const hit = res.results.find((r) => r.id === 'm1')!;
+    expect(hit.link).toBe('http://example.com/channel/r1?msg=m1');
+  });
+
+  it('omits the permalink when no base URL is configured', async () => {
+    db = openDb(':memory:');
+    seedRoom();
+    db.upsertMessages([msg('m1', { text: 'the deployment pipeline broke today' })]);
+
+    const { rc } = fakeRc();
+    const svc = new SearchService(db, rc, fakeSync());
+    const res = await svc.search('deployment', { room: room('r1') });
+
+    expect(res.results.find((r) => r.id === 'm1')!.link).toBeUndefined();
+  });
+
   it('ranks an exact-phrase match above a weak single-term match (bm25 asc)', async () => {
     db = openDb(':memory:');
     seedRoom();

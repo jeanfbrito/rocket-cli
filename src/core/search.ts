@@ -6,7 +6,7 @@ import type { Db } from './db.js';
 import type { RcClient } from './rc-client.js';
 import { RcApiError } from './errors.js';
 import { log } from './log.js';
-import { messageToRow, rowToCompact, type RcWireMessage } from './normalize.js';
+import { messageToRow, rowToCompact, rowToCompactWithLink, type RcWireMessage } from './normalize.js';
 import type { CompactMessage, MessageRow, RoomRow } from './types.js';
 
 /**
@@ -83,6 +83,10 @@ export class SearchService {
     private readonly db: Db,
     private readonly rc: RcClient,
     private readonly sync: SyncLike,
+    /** Server base URL for composing message permalinks. Optional so existing
+     *  callers/tests keep their 3-arg signature; links are omitted when absent
+     *  or when the hit's room isn't cached. */
+    private readonly baseUrl?: string,
   ) {}
 
   async search(query: string, opts: SearchOptions = {}): Promise<SearchResult> {
@@ -202,7 +206,13 @@ export class SearchService {
   }
 
   private toHit(row: MessageRow, source: 'local' | 'server'): SearchHit {
-    const compact = rowToCompact(row);
+    // Search spans all cached rooms, so look up each hit's room to build its
+    // link. Tolerate an unknown room (or no baseUrl) by omitting the link.
+    const room = this.baseUrl ? this.db.getRoom(row.rid) : undefined;
+    const compact =
+      this.baseUrl && room
+        ? rowToCompactWithLink(row, room, this.baseUrl)
+        : rowToCompact(row);
     const hit: SearchHit = { ...compact, roomId: row.rid, source };
     const snip = (row as Partial<FtsRow>).snip;
     if (typeof snip === 'string' && snip.length > 0) hit.snippet = snip;

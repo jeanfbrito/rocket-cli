@@ -6,6 +6,7 @@ import type { Db } from './db.js';
 import type { RoomRow } from './types.js';
 import type { RcClient } from './rc-client.js';
 import { subscriptionToRoomRow } from './normalize.js';
+import { looksLikeUrl, parseRocketChatUrl } from './urls.js';
 
 /** Meta key holding the ISO timestamp of the last subscriptions refresh. */
 const ROOMS_REFRESHED_AT = 'rooms_refreshed_at';
@@ -16,6 +17,10 @@ export class RoomDirectory {
   constructor(
     private readonly db: Db,
     private readonly rc: RcClient,
+    /** Configured server base URL. When set, resolve() accepts pasted
+     *  Rocket.Chat web links and inverts them to a room reference. Optional so
+     *  existing test setups that don't exercise URL input keep working. */
+    private readonly baseUrl?: string,
   ) {}
 
   /** Pull the full subscription list and upsert every room. */
@@ -48,31 +53,56 @@ export class RoomDirectory {
    * retry, then throw. Multiple substring matches throw with candidate names.
    */
   async resolve(input: string): Promise<RoomRow> {
-    const found = this.match(input);
+    // Pasted Rocket.Chat web link: invert it to a room reference before the
+    // normal name/rid matching. A URL on a different server is a hard error —
+    // we never silently fall through to substring matching on the raw URL.
+    const ref = this.refFromUrl(input);
+
+    const found = this.match(ref);
     if (found) return found;
 
     // Miss (or ambiguous): a stale directory may be hiding the room. Refresh
     // once and retry before giving up.
     await this.refresh();
-    const retry = this.match(input);
+    const retry = this.match(ref);
     if (retry) return retry;
 
     // Surface ambiguity explicitly if the only reason we failed is multiple
     // substring candidates (match() returns null for both miss and ambiguity).
-    const candidates = this.substringCandidates(input);
+    const candidates = this.substringCandidates(ref);
     if (candidates.length > 1) {
       const names = candidates
         .map((r) => r.name ?? r.fname ?? r.rid)
         .join(', ');
       throw new Error(
-        `Room "${input}" is ambiguous — matches multiple rooms: ${names}. ` +
+        `Room "${ref}" is ambiguous — matches multiple rooms: ${names}. ` +
           'Use a more specific name or the exact room id.',
       );
     }
 
     throw new Error(
-      `Room "${input}" not found — use list_rooms/rooms command to see available rooms.`,
+      `Room "${ref}" not found — use list_rooms/rooms command to see available rooms.`,
     );
+  }
+
+  /**
+   * If `input` is a pasted URL, invert it into a room reference (room name for
+   * channel/group, rid for direct). A URL on a different server — or one we
+   * cannot parse as a room link — is a hard error rather than a silent
+   * fall-through, since substring-matching a raw URL would only mislead.
+   * Non-URL input is returned unchanged.
+   */
+  private refFromUrl(input: string): string {
+    if (!looksLikeUrl(input)) return input;
+    const parsed =
+      this.baseUrl != null ? parseRocketChatUrl(this.baseUrl, input) : null;
+    if (!parsed) {
+      throw new Error(
+        `URL is not on configured server ${this.baseUrl ?? '(unset)'} — ` +
+          'paste a link from this Rocket.Chat instance, or use a room name/id.',
+      );
+    }
+    return parsed.roomRef;
   }
 
   /** List rooms from the cache, refreshing first if stale. */

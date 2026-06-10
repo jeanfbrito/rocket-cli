@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { App } from '../../core/app.js';
-import { rowToCompact } from '../../core/normalize.js';
 import { fail, ok, readEnvelope } from './shared.js';
 
 export function registerGetMessagesTool(server: McpServer, app: App): void {
@@ -67,7 +66,7 @@ export function registerGetMessagesTool(server: McpServer, app: App): void {
           includeSystem,
         });
         const finalRoom = app.db.getRoom(rid) ?? refreshed;
-        return ok(readEnvelope(finalRoom, rows.map(rowToCompact)));
+        return ok(readEnvelope(finalRoom, rows, app.config.url));
       } catch (err) {
         return fail(err);
       }

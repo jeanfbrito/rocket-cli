@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { App } from '../../core/app.js';
 import { uploadFile } from '../../core/files.js';
-import { messageToRow, rowToCompact } from '../../core/normalize.js';
+import { messageToRow, rowToCompactWithLink } from '../../core/normalize.js';
 import { fail, ok } from './shared.js';
 
 export function registerUploadFileTool(server: McpServer, app: App): void {
@@ -45,7 +45,7 @@ export function registerUploadFileTool(server: McpServer, app: App): void {
         // Write-through into the cache, mirroring app.sendMessage.
         const row = messageToRow(message, roomRow.rid);
         app.db.upsertMessages([row]);
-        return ok({ sent: rowToCompact(row) });
+        return ok({ sent: rowToCompactWithLink(row, roomRow, app.config.url) });
       } catch (err) {
         return fail(err);
       }

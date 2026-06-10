@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { App } from '../../core/app.js';
-import { rowToCompact } from '../../core/normalize.js';
+import { rowToCompact, rowToCompactWithLink } from '../../core/normalize.js';
+import { extractMessageId, looksLikeUrl } from '../../core/urls.js';
 import { coverageOf, fail, ok, roomTypeLabel } from './shared.js';
 
 export function registerGetThreadMessagesTool(server: McpServer, app: App): void {
@@ -17,7 +18,10 @@ export function registerGetThreadMessagesTool(server: McpServer, app: App): void
       inputSchema: {
         threadId: z
           .string()
-          .describe('The id of the thread parent message.'),
+          .describe(
+            'Thread parent message id OR a pasted Rocket.Chat message link ' +
+              '(the message id / thread tmid is extracted from the URL).',
+          ),
         count: z
           .number()
           .int()
@@ -30,12 +34,20 @@ export function registerGetThreadMessagesTool(server: McpServer, app: App): void
     },
     async ({ threadId, count }) => {
       try {
-        const parent = await app.sync.ensureThreadLoaded(threadId);
-        const replies = app.db.getThreadMessages(threadId, { limit: count });
+        // Accept a pasted message link in place of a raw id.
+        const tmid = looksLikeUrl(threadId)
+          ? (extractMessageId(app.config.url, threadId) ?? threadId)
+          : threadId;
+        const parent = await app.sync.ensureThreadLoaded(tmid);
+        const replies = app.db.getThreadMessages(tmid, { limit: count });
         const room = app.db.getRoom(parent.rid);
+        // Links require the room row; when the room isn't cached, omit them.
+        const toCompact = room
+          ? (r: typeof parent) => rowToCompactWithLink(r, room, app.config.url)
+          : rowToCompact;
         return ok({
-          parent: rowToCompact(parent),
-          messages: replies.map(rowToCompact),
+          parent: toCompact(parent),
+          messages: replies.map(toCompact),
           room: room
             ? {
                 id: room.rid,

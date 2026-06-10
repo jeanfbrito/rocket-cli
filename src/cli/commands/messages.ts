@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 import { withApp, printTable } from './util.js';
-import { rowToCompact } from '../../core/normalize.js';
+import { rowToCompactWithLink } from '../../core/normalize.js';
 
 export function register(program: Command): void {
   program
@@ -42,7 +42,9 @@ export function register(program: Command): void {
           const ordered = [...rows].reverse();
 
           if (command.optsWithGlobals<{ json?: boolean }>().json) {
-            const compact = ordered.map((r) => rowToCompact(r));
+            const compact = ordered.map((r) =>
+              rowToCompactWithLink(r, roomRow, app.config.url),
+            );
             process.stdout.write(JSON.stringify(compact) + '\n');
             return;
           }

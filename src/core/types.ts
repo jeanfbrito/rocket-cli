@@ -22,6 +22,10 @@ export interface MessageRow {
   attachments_json: string | null; // JSON array of one-liner strings
   deleted: number; // 0 | 1
   updated_at: string | null; // ISO8601, from _updatedAt
+  /** JSON array of mentioned usernames (incl. 'all'/'here'), from
+   *  IMessage.mentions. Defaults to '[]'. Optional on the type because rows
+   *  cached before schema v5 may predate the column population. */
+  mentions?: string;
 }
 
 /**
@@ -42,6 +46,12 @@ export interface RoomRow {
   /** 0 | 1. Managed by sync engine. */
   fully_backfilled?: number;
   sub_updated_at: string | null; // ISO8601, from subscription _updatedAt
+  /** Last-read watermark (ISO8601) from ISubscription.ls, or null if the room
+   *  has never been opened. Messages with ts > ls are unread. From subscription. */
+  ls?: string | null;
+  /** JSON array of thread-parent ids with unread replies, from
+   *  ISubscription.tunread. Defaults to '[]'. From subscription. */
+  tunread?: string;
 }
 
 /**
@@ -76,4 +86,7 @@ export interface CompactMessage {
   edited?: true;
   system?: string;
   attachments?: string[];
+  /** Absolute deep-link to this message in the Rocket.Chat web UI, when the
+   *  emitting surface knows the room + base URL. Lets summaries cite sources. */
+  link?: string;
 }

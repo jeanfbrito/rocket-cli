@@ -123,6 +123,29 @@ function attachmentsJson(attachments: RcWireAttachment[] | undefined): string | 
   return JSON.stringify(lines);
 }
 
+/**
+ * Extract the mentioned *usernames* from IMessage.mentions, as a JSON array
+ * TEXT for the `messages.mentions` column. Each entry is a MessageMention
+ * `{ _id, username?, name?, type? }`; we keep only `username` (entries without
+ * one are skipped — they cannot be matched against the user's @handle anyway).
+ * Channel-wide mentions arrive as username 'all' / 'here' and are kept verbatim.
+ * Always returns valid JSON ('[]' when there are no usable mentions) so the
+ * NOT NULL column and json_each never see NULL.
+ */
+function mentionsJson(
+  mentions: NonNullable<RcWireMessage['mentions']> | undefined,
+): string {
+  if (!Array.isArray(mentions) || mentions.length === 0) return '[]';
+  const usernames: string[] = [];
+  for (const m of mentions) {
+    const username = m?.username;
+    if (typeof username === 'string' && username.length > 0) {
+      usernames.push(username);
+    }
+  }
+  return JSON.stringify(usernames);
+}
+
 /** RC message JSON -> messages-table row. */
 export function messageToRow(raw: RcWireMessage, rid: string): MessageRow {
   const u = raw.u ?? ({} as NonNullable<RcWireMessage['u']>);
@@ -145,6 +168,7 @@ export function messageToRow(raw: RcWireMessage, rid: string): MessageRow {
     attachments_json: attachmentsJson(raw.attachments as RcWireAttachment[] | undefined),
     deleted: 0,
     updated_at: toIso(raw._updatedAt),
+    mentions: mentionsJson(raw.mentions),
   };
 }
 
@@ -174,8 +198,61 @@ export function rowToCompact(row: MessageRow): CompactMessage {
   return compact;
 }
 
+/**
+ * Build an absolute deep-link to a message in the Rocket.Chat web UI.
+ *
+ * Mirrors the server's own permalink composition. In Rocket.Chat,
+ * `getPermaLink` (apps/meteor/client/lib/getPermaLink.ts) returns
+ * `` `${roomURL}?msg=${msgId}` ``, where `roomURL` comes from
+ * `roomCoordinator.getURL(room.t, sub)` — the route path per room type
+ * (apps/meteor/lib/rooms/roomTypes/{public,private,direct}.ts):
+ *   - channel ('c'): `/channel/:name`         -> {base}/channel/{name}?msg={id}
+ *   - group   ('p'): `/group/:name`           -> {base}/group/{name}?msg={id}
+ *   - direct  ('d'): `/direct/:rid` (the route `link` fn returns
+ *                    `{ rid: sub.rid || sub.name }`) -> {base}/direct/{rid}?msg={id}
+ * The `:name` segment is URL-encoded (room names may contain non-ASCII chars).
+ */
+export function permalink(
+  baseUrl: string,
+  room: Pick<RoomRow, 'rid' | 'name' | 'fname' | 't'>,
+  messageId: string,
+): string {
+  const base = baseUrl.replace(/\/+$/, '');
+  let segment: string;
+  switch (room.t) {
+    case 'p':
+      segment = `group/${encodeURIComponent(room.name ?? room.fname ?? room.rid)}`;
+      break;
+    case 'd':
+      // Direct messages route by room id (the route's link fn uses sub.rid).
+      segment = `direct/${encodeURIComponent(room.rid)}`;
+      break;
+    default:
+      segment = `channel/${encodeURIComponent(room.name ?? room.fname ?? room.rid)}`;
+      break;
+  }
+  return `${base}/${segment}?msg=${messageId}`;
+}
+
+/** messages-table row -> compact LLM record, with a `link` deep-link attached.
+ *  Thin wrapper over rowToCompact so existing room-agnostic callers keep their
+ *  signature; surfaces that hold the room row use this to cite sources. */
+export function rowToCompactWithLink(
+  row: MessageRow,
+  room: Pick<RoomRow, 'rid' | 'name' | 'fname' | 't'>,
+  baseUrl: string,
+): CompactMessage {
+  const compact = rowToCompact(row);
+  compact.link = permalink(baseUrl, room, row.id);
+  return compact;
+}
+
 /** subscription -> rooms-table row (subset). */
 export function subscriptionToRoomRow(sub: RcWireSubscription): RoomRow {
+  // `ls` is a Date over the wire (ISubscription.ls); funnel it through the same
+  // toIso guard as the other dates. `tunread` is an optional string[] of thread
+  // parent ids with unread replies; stringify it (default '[]').
+  const tunread = Array.isArray(sub.tunread) ? sub.tunread : [];
   return {
     rid: sub.rid ?? '',
     name: sub.name ?? null,
@@ -183,5 +260,7 @@ export function subscriptionToRoomRow(sub: RcWireSubscription): RoomRow {
     t: sub.t ?? '',
     unread: typeof sub.unread === 'number' ? sub.unread : 0,
     sub_updated_at: toIso(sub._updatedAt),
+    ls: toIso(sub.ls as RcDate),
+    tunread: JSON.stringify(tunread),
   };
 }

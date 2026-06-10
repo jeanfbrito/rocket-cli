@@ -1,9 +1,10 @@
 // Shared conventions for MCP tool handlers: compact JSON success/error
 // envelopes and the read-tool room envelope builder. Keeping these here means
 // every tool returns the same shape, so the LLM client sees a consistent
-// contract across all six tools.
+// contract across all registered tools.
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { CompactMessage, RoomRow } from '../../core/types.js';
+import { rowToCompactWithLink } from '../../core/normalize.js';
+import type { CompactMessage, MessageRow, RoomRow } from '../../core/types.js';
 
 /** Success: compact JSON (no indentation — every byte costs the client). */
 export function ok(payload: unknown): CallToolResult {
@@ -61,9 +62,13 @@ export interface ReadEnvelope {
   messages: CompactMessage[];
 }
 
+/** Build the read envelope, attaching a permalink to each message. Pass the
+ *  raw rows (not pre-compacted records) so the link can be composed from the
+ *  room + base URL here, keeping every read surface consistent. */
 export function readEnvelope(
   room: RoomRow,
-  messages: CompactMessage[],
+  rows: MessageRow[],
+  baseUrl: string,
 ): ReadEnvelope {
   return {
     room: {
@@ -73,6 +78,6 @@ export function readEnvelope(
     },
     syncedThrough: room.last_synced_at ?? null,
     coverage: coverageOf(room),
-    messages,
+    messages: rows.map((r) => rowToCompactWithLink(r, room, baseUrl)),
   };
 }

@@ -64,7 +64,7 @@ function ftsRowids(db: Db, query: string): number[] {
 describe('migrations', () => {
   it('migrates a :memory: db cleanly and sets schema_version', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('3');
+    expect(db.getMeta('schema_version')).toBe('5');
     const tables = (
       db.conn
         .prepare(
@@ -85,6 +85,57 @@ describe('migrations', () => {
     db.close();
   });
 
+  it('v4 adds ls + tunread columns to rooms', () => {
+    const db = openDb(':memory:');
+    expect(db.getMeta('schema_version')).toBe('5');
+    const cols = (
+      db.conn.prepare('PRAGMA table_info(rooms)').all() as { name: string }[]
+    ).map((c) => c.name);
+    expect(cols).toEqual(expect.arrayContaining(['ls', 'tunread']));
+    db.close();
+  });
+
+  it('v5 adds a mentions column + partial index, defaulting to []', () => {
+    const db = openDb(':memory:');
+    expect(db.getMeta('schema_version')).toBe('5');
+
+    const cols = (
+      db.conn.prepare('PRAGMA table_info(messages)').all() as { name: string }[]
+    ).map((c) => c.name);
+    expect(cols).toContain('mentions');
+
+    const indexes = (
+      db.conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+        .all() as { name: string }[]
+    ).map((r) => r.name);
+    expect(indexes).toContain('idx_messages_mentions');
+
+    // A row inserted without an explicit mentions value defaults to '[]'.
+    db.upsertRoom(room('r1'));
+    db.upsertMessages([msg('m1')]);
+    const stored = (
+      db.conn.prepare("SELECT mentions FROM messages WHERE id = 'm1'").get() as {
+        mentions: string;
+      }
+    ).mentions;
+    expect(stored).toBe('[]');
+    db.close();
+  });
+
+  it('json_each is available in the better-sqlite3 SQLite build', () => {
+    // findMentions relies on the json_each table-valued function; assert the
+    // runtime supports it rather than silently falling back to LIKE.
+    const db = openDb(':memory:');
+    const rows = db.conn
+      .prepare(
+        `SELECT value FROM json_each('["jean","all"]') WHERE value = 'jean'`,
+      )
+      .all() as { value: string }[];
+    expect(rows.map((r) => r.value)).toEqual(['jean']);
+    db.close();
+  });
+
   it('is idempotent: re-opening the same file applies no further migrations', () => {
     const dir = mkdtempSync(join(tmpdir(), 'rocket-db-'));
     const path = join(dir, 'cache.db');
@@ -95,7 +146,7 @@ describe('migrations', () => {
 
       const db2 = openDb(path);
       // Still at the latest version, prior data preserved → no destructive re-run.
-      expect(db2.getMeta('schema_version')).toBe('3');
+      expect(db2.getMeta('schema_version')).toBe('5');
       expect(db2.getMeta('instance_url')).toBe('https://example.com');
       db2.close();
     } finally {
@@ -289,6 +340,64 @@ describe('repository', () => {
     expect(db.getThreadMessages('p1').map((m) => m.id)).toEqual(['r1', 'r2']);
   });
 
+  it('findMentions matches ANY of the usernames via json_each, newest first', () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    db.upsertMessages([
+      msg('me1', { ts: '2026-06-10T01:00:00.000Z', mentions: '["jean"]' }),
+      msg('other', { ts: '2026-06-10T02:00:00.000Z', mentions: '["bob"]' }),
+      msg('me2', { ts: '2026-06-10T03:00:00.000Z', mentions: '["bob","jean"]' }),
+      msg('all1', { ts: '2026-06-10T04:00:00.000Z', mentions: '["all"]' }),
+      msg('none', { ts: '2026-06-10T05:00:00.000Z', mentions: '[]' }),
+    ]);
+
+    // Just my username: newest first, only rows that contain it.
+    const mine = db.findMentions(['jean']);
+    expect(mine.map((m) => m.id)).toEqual(['me2', 'me1']);
+
+    // Channel-wide adds @all.
+    const wide = db.findMentions(['jean', 'all', 'here']);
+    expect(wide.map((m) => m.id)).toEqual(['all1', 'me2', 'me1']);
+
+    // Empty username list short-circuits to no rows.
+    expect(db.findMentions([])).toEqual([]);
+  });
+
+  it('findMentions honors sinceTs, limit, and excludes soft-deleted', () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    db.upsertMessages([
+      msg('old', { ts: '2026-06-01T00:00:00.000Z', mentions: '["jean"]' }),
+      msg('mid', { ts: '2026-06-08T00:00:00.000Z', mentions: '["jean"]' }),
+      msg('new', { ts: '2026-06-10T00:00:00.000Z', mentions: '["jean"]' }),
+      msg('del', { ts: '2026-06-10T01:00:00.000Z', mentions: '["jean"]' }),
+    ]);
+    db.markMessagesDeleted(['del']);
+
+    // sinceTs excludes 'old'; deleted 'del' never appears.
+    const recent = db.findMentions(['jean'], { sinceTs: '2026-06-05T00:00:00.000Z' });
+    expect(recent.map((m) => m.id)).toEqual(['new', 'mid']);
+
+    // limit caps to the newest N.
+    const capped = db.findMentions(['jean'], { limit: 1 });
+    expect(capped.map((m) => m.id)).toEqual(['new']);
+  });
+
+  it('findMentions reflects edits that change the mentions list', () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    db.upsertMessages([msg('m1', { mentions: '["bob"]' })]);
+    expect(db.findMentions(['jean'])).toEqual([]);
+
+    // Edit re-targets the mention at me.
+    db.upsertMessages([msg('m1', { mentions: '["jean"]' })]);
+    expect(db.findMentions(['jean']).map((m) => m.id)).toEqual(['m1']);
+
+    // Another edit drops me again.
+    db.upsertMessages([msg('m1', { mentions: '["carol"]' })]);
+    expect(db.findMentions(['jean'])).toEqual([]);
+  });
+
   it('thread_sync get/set round-trips', () => {
     db = openDb(':memory:');
     expect(db.getThreadSync('t1')).toBeUndefined();
@@ -328,6 +437,55 @@ describe('repository', () => {
     expect(r?.last_synced_at).toBe('2026-06-10T10:00:00.000Z');
     expect(r?.oldest_loaded_ts).toBe('2026-06-01T00:00:00.000Z');
     expect(r?.fully_backfilled).toBe(1);
+  });
+
+  it('ls/tunread update on subscription re-upsert but sync watermarks survive', () => {
+    db = openDb(':memory:');
+    // Initial subscription state: read marker + one unread thread.
+    db.upsertRoom(
+      room('r1', {
+        unread: 2,
+        ls: '2026-06-10T08:00:00.000Z',
+        tunread: '["p1"]',
+      }),
+    );
+    // Sync engine sets watermarks independently.
+    db.setRoomSyncState('r1', {
+      lastSyncedAt: '2026-06-10T10:00:00.000Z',
+      oldestLoadedTs: '2026-06-01T00:00:00.000Z',
+      fullyBackfilled: true,
+    });
+    // Fresh subscription data arrives (room re-upsert with NO watermarks):
+    // the user read more, so ls advances and tunread clears.
+    db.upsertRoom(
+      room('r1', {
+        unread: 0,
+        ls: '2026-06-10T12:00:00.000Z',
+        tunread: '[]',
+      }),
+    );
+    const r = db.getRoom('r1');
+    // Subscription-sourced fields updated on conflict.
+    expect(r?.ls).toBe('2026-06-10T12:00:00.000Z');
+    expect(r?.tunread).toBe('[]');
+    expect(r?.unread).toBe(0);
+    // Sync watermarks preserved (NOT in the ON CONFLICT SET list).
+    expect(r?.last_synced_at).toBe('2026-06-10T10:00:00.000Z');
+    expect(r?.oldest_loaded_ts).toBe('2026-06-01T00:00:00.000Z');
+    expect(r?.fully_backfilled).toBe(1);
+  });
+
+  it('findUnreadRooms returns rooms with unread > 0 OR non-empty tunread', () => {
+    db = openDb(':memory:');
+    db.upsertRooms([
+      room('read', { name: 'read', unread: 0, tunread: '[]' }),
+      room('hasUnread', { name: 'hasUnread', unread: 3, tunread: '[]' }),
+      room('hasThread', { name: 'hasThread', unread: 0, tunread: '["p1"]' }),
+    ]);
+    expect(db.findUnreadRooms().map((r) => r.rid).sort()).toEqual([
+      'hasThread',
+      'hasUnread',
+    ]);
   });
 
   it('findRooms filters by type and nameLike', () => {

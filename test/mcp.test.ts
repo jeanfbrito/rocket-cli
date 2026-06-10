@@ -146,7 +146,7 @@ function makeApp(db: Db, rc: FakeRc, opts?: { emojiImages?: boolean }): App {
     emojiImages,
   );
   const sync = new SyncEngine(db, rc as never, rooms, { ttlSeconds: 60, backfillLimit: 100 });
-  const search = new SearchService(db, rc as never, sync);
+  const search = new SearchService(db, rc as never, sync, 'http://example.com');
   const config = {
     url: 'http://example.com',
     token: 'tok',
@@ -199,23 +199,28 @@ describe('mcp server', () => {
     db?.close();
   });
 
-  it('lists exactly twelve tools with readOnlyHint on the read tools', async () => {
+  it('lists exactly seventeen tools with readOnlyHint on the read tools', async () => {
     client = await connect(app);
     const { tools } = await client.listTools();
 
-    expect(tools).toHaveLength(12);
+    expect(tools).toHaveLength(17);
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
         'add_reaction',
         'download_attachment',
+        'get_attention',
         'get_custom_emoji',
+        'get_mentions',
+        'get_message_context',
         'get_messages',
         'get_thread_messages',
+        'get_unread',
         'get_user_profile',
         'list_custom_emojis',
         'list_rooms',
         'list_threads',
+        'open_url',
         'search_messages',
         'send_message',
         'upload_file',
@@ -228,13 +233,18 @@ describe('mcp server', () => {
       .sort();
     expect(readOnly).toEqual(
       [
+        'get_attention',
         'get_custom_emoji',
+        'get_mentions',
+        'get_message_context',
         'get_messages',
         'get_thread_messages',
+        'get_unread',
         'get_user_profile',
         'list_custom_emojis',
         'list_rooms',
         'list_threads',
+        'open_url',
         'search_messages',
       ].sort(),
     );
@@ -291,6 +301,112 @@ describe('mcp server', () => {
     expect(payload.messages[0].author).toBe('alice');
     // Thread parent surfaces a replyCount.
     expect(payload.messages[1].replyCount).toBe(2);
+    // Each message carries a clickable permalink against the configured URL.
+    expect(payload.messages[0].link).toBe('http://example.com/channel/general?msg=m2');
+    expect(payload.messages[1].link).toBe('http://example.com/channel/general?msg=m1');
+  });
+
+  it('get_unread reports messages and thread replies past the last-read watermark', async () => {
+    const ls = '2026-06-10T12:00:00.000Z';
+    // Subscription state drives the unread view: unread count, ls watermark,
+    // and a thread parent with an unread reply.
+    rc.onSubscriptions({
+      update: [
+        { rid: 'C1', name: 'general', fname: 'General', t: 'c', unread: 1, ls, tunread: ['P'] },
+      ],
+      remove: [],
+    });
+    // Room + thread already cached & synced so ensureRoomSynced/ensureThreadLoaded
+    // hit no network. Seed messages around the watermark.
+    db.upsertRoom({ rid: 'C1', name: 'general', fname: 'General', t: 'c', unread: 0, sub_updated_at: null });
+    db.setRoomSyncState('C1', { lastSyncedAt: new Date().toISOString() });
+    db.upsertMessages([
+      { id: 'P', rid: 'C1', author_id: 'u1', author_username: 'alice', author_name: 'Alice', text: 'parent', ts: '2026-06-10T10:00:00.000Z', tmid: null, tcount: 1, tlm: '2026-06-10T13:00:00.000Z', edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+      { id: 'read1', rid: 'C1', author_id: 'u2', author_username: 'bob', author_name: 'Bob', text: 'already read', ts: '2026-06-10T11:00:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+      { id: 'unread1', rid: 'C1', author_id: 'u3', author_username: 'carol', author_name: 'Carol', text: 'unread main', ts: '2026-06-10T13:30:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+      { id: 'rNew', rid: 'C1', author_id: 'u4', author_username: 'dave', author_name: 'Dave', text: 'unread reply', ts: '2026-06-10T13:00:00.000Z', tmid: 'P', tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+    ]);
+    db.setThreadSync('P', { lastSyncedAt: new Date().toISOString(), fullyLoaded: true });
+    client = await connect(app);
+
+    const res = await client.callTool({ name: 'get_unread', arguments: {} });
+    const payload = resultJson(res);
+
+    expect(payload.totals).toEqual({ rooms: 1, messages: 1, threads: 1 });
+    const r = payload.rooms[0];
+    expect(r.room).toEqual({ id: 'C1', name: 'general', type: 'channel' });
+    expect(r.unreadCount).toBe(1);
+    expect(r.approximate).toBe(false);
+    expect(r.messages.map((m: any) => m.id)).toEqual(['unread1']);
+    expect(r.unreadThreads[0].parent.id).toBe('P');
+    expect(r.unreadThreads[0].messages.map((m: any) => m.id)).toEqual(['rNew']);
+  });
+
+  it('get_attention prioritizes, dedupes, and sections by source', async () => {
+    const ls = '2026-06-10T12:00:00.000Z';
+    rc.onUserInfo({ user: { _id: 'uid', username: 'jean' } });
+    // Two unread rooms: a channel (C1) and a DM (D1). C1 also carries a thread
+    // with an unread reply.
+    rc.onSubscriptions({
+      update: [
+        { rid: 'C1', name: 'general', fname: 'General', t: 'c', unread: 2, ls, tunread: ['P'] },
+        { rid: 'D1', name: 'rocket.cat', fname: 'Rocket.Cat', t: 'd', unread: 1, ls },
+      ],
+      remove: [],
+    });
+    db.upsertRoom({ rid: 'C1', name: 'general', fname: 'General', t: 'c', unread: 0, sub_updated_at: null });
+    db.upsertRoom({ rid: 'D1', name: 'rocket.cat', fname: 'Rocket.Cat', t: 'd', unread: 0, sub_updated_at: null });
+    db.setRoomSyncState('C1', { lastSyncedAt: new Date().toISOString() });
+    db.setRoomSyncState('D1', { lastSyncedAt: new Date().toISOString() });
+    db.upsertMessages([
+      // Thread parent (read) + its unread reply.
+      { id: 'P', rid: 'C1', author_id: 'u1', author_username: 'alice', author_name: 'Alice', text: 'parent', ts: '2026-06-10T10:00:00.000Z', tmid: null, tcount: 1, tlm: '2026-06-10T13:00:00.000Z', edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
+      { id: 'tReply', rid: 'C1', author_id: 'u4', author_username: 'dave', author_name: 'Dave', text: 'unread reply', ts: '2026-06-10T13:00:00.000Z', tmid: 'P', tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
+      // Plain unread channel message mentioning jean -> appears in BOTH mentions
+      // and channel-unread; must surface ONLY in mentions with alsoUnread.
+      { id: 'cMention', rid: 'C1', author_id: 'u2', author_username: 'bob', author_name: 'Bob', text: 'hey @jean look', ts: '2026-06-10T13:30:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '["jean"]' },
+      // Plain unread channel message, no mention -> channelUnreads.
+      { id: 'cPlain', rid: 'C1', author_id: 'u3', author_username: 'carol', author_name: 'Carol', text: 'unrelated', ts: '2026-06-10T13:45:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
+      // Unread DM message, no mention -> directUnreads.
+      { id: 'dm1', rid: 'D1', author_id: 'u5', author_username: 'cat', author_name: 'Rocket Cat', text: 'ping', ts: '2026-06-10T13:10:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
+    ]);
+    db.setThreadSync('P', { lastSyncedAt: new Date().toISOString(), fullyLoaded: true });
+    client = await connect(app);
+
+    const res = await client.callTool({
+      name: 'get_attention',
+      arguments: { sinceDays: 30 },
+    });
+    const payload = resultJson(res);
+
+    // Mentions: the channel mention, flagged alsoUnread (it is also unread).
+    expect(payload.mentions.map((i: any) => i.message.id)).toEqual(['cMention']);
+    expect(payload.mentions[0].alsoUnread).toBe(true);
+    expect(payload.mentions[0].room.id).toBe('C1');
+
+    // The mentioned id must NOT reappear in any unread section (dedupe).
+    const channelIds = payload.channelUnreads.map((i: any) => i.message.id);
+    expect(channelIds).toContain('cPlain');
+    expect(channelIds).not.toContain('cMention');
+
+    // DM unread routed to directUnreads.
+    expect(payload.directUnreads.map((i: any) => i.message.id)).toEqual(['dm1']);
+    expect(payload.directUnreads[0].room.type).toBe('dm');
+
+    // Thread reply surfaces under threadUnreads with its parent.
+    expect(payload.threadUnreads).toHaveLength(1);
+    expect(payload.threadUnreads[0].parent.id).toBe('P');
+    expect(payload.threadUnreads[0].messages.map((m: any) => m.id)).toEqual(['tReply']);
+
+    expect(payload.totals).toEqual({
+      mentions: 1,
+      directUnreads: 1,
+      threadUnreads: 1,
+      channelUnreads: 1,
+      all: 4,
+    });
+    expect(typeof payload.searchedSince).toBe('string');
+    expect(typeof payload.generatedAt).toBe('string');
   });
 
   it('get_thread_messages returns the parent plus ordered replies', async () => {

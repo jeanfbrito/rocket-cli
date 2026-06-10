@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { App } from '../../core/app.js';
 import { RcApiError } from '../../core/errors.js';
+import { extractMessageId, looksLikeUrl } from '../../core/urls.js';
 import { fail, ok } from './shared.js';
 
 /** Wrap an emoji name in colons if not already wrapped. */
@@ -22,7 +23,12 @@ export function registerAddReactionTool(server: McpServer, app: App): void {
         'without surrounding colons (e.g. "thumbsup" or ":thumbsup:"). ' +
         'Set remove: true to withdraw an existing reaction.',
       inputSchema: {
-        messageId: z.string().describe('id of the message to react to'),
+        messageId: z
+          .string()
+          .describe(
+            'id of the message to react to, OR a pasted Rocket.Chat message ' +
+              'link (the message id is extracted from the URL)',
+          ),
         emoji: z
           .string()
           .describe("emoji name, e.g. 'thumbsup' or ':thumbsup:'"),
@@ -34,13 +40,17 @@ export function registerAddReactionTool(server: McpServer, app: App): void {
     },
     async ({ messageId, emoji, remove }) => {
       try {
+        // Accept a pasted message link in place of a raw id.
+        const targetId = looksLikeUrl(messageId)
+          ? (extractMessageId(app.config.url, messageId) ?? messageId)
+          : messageId;
         const normalizedEmoji = normalizeEmoji(emoji);
         await app.rc.react({
-          messageId,
+          messageId: targetId,
           emoji: normalizedEmoji,
           shouldReact: !remove,
         });
-        return ok({ reacted: !remove, messageId, emoji: normalizedEmoji });
+        return ok({ reacted: !remove, messageId: targetId, emoji: normalizedEmoji });
       } catch (err) {
         // Enrich invalid-emoji failures with custom-emoji suggestions. The
         // server rejects an unknown emoji with an 'Invalid emoji' message or an

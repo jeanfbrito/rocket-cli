@@ -60,6 +60,7 @@ const MUTABLE_MESSAGE_COLUMNS = [
   'attachments_json',
   'deleted',
   'updated_at',
+  'mentions',
 ] as const;
 
 /**
@@ -99,20 +100,28 @@ export class Db {
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     );
 
+    // `ls` and `tunread` are subscription-sourced (like name/fname/unread), so
+    // they DO update on conflict — the whole point of the unread view is fresh
+    // read-state. This is the opposite of the sync watermarks (last_synced_at,
+    // oldest_loaded_ts, fully_backfilled), which are managed by the sync engine
+    // and deliberately omitted from the SET list so a subscription re-upsert
+    // never clobbers them (see the "does not clobber sync watermarks" test).
     this.stmtUpsertRoom = conn.prepare(
       `INSERT INTO rooms (
          rid, name, fname, t, unread, last_synced_at,
-         oldest_loaded_ts, fully_backfilled, sub_updated_at
+         oldest_loaded_ts, fully_backfilled, sub_updated_at, ls, tunread
        ) VALUES (
          @rid, @name, @fname, @t, @unread, @last_synced_at,
-         @oldest_loaded_ts, @fully_backfilled, @sub_updated_at
+         @oldest_loaded_ts, @fully_backfilled, @sub_updated_at, @ls, @tunread
        )
        ON CONFLICT(rid) DO UPDATE SET
          name = excluded.name,
          fname = excluded.fname,
          t = excluded.t,
          unread = excluded.unread,
-         sub_updated_at = excluded.sub_updated_at`,
+         sub_updated_at = excluded.sub_updated_at,
+         ls = excluded.ls,
+         tunread = excluded.tunread`,
     );
     this.stmtGetRoom = conn.prepare('SELECT * FROM rooms WHERE rid = ?');
 
@@ -123,11 +132,11 @@ export class Db {
       `INSERT INTO messages (
          id, rid, author_id, author_username, author_name, text, ts,
          tmid, tcount, tlm, edited_at, system_type, attachments_json,
-         deleted, updated_at
+         deleted, updated_at, mentions
        ) VALUES (
          @id, @rid, @author_id, @author_username, @author_name, @text, @ts,
          @tmid, @tcount, @tlm, @edited_at, @system_type, @attachments_json,
-         @deleted, @updated_at
+         @deleted, @updated_at, @mentions
        )
        ON CONFLICT(id) DO UPDATE SET ${updateClause}`,
     );
@@ -174,10 +183,16 @@ export class Db {
           last_synced_at: room.last_synced_at ?? null,
           oldest_loaded_ts: room.oldest_loaded_ts ?? null,
           fully_backfilled: room.fully_backfilled ?? 0,
+          ls: room.ls ?? null,
+          tunread: room.tunread ?? '[]',
         });
     });
     this.txUpsertMessages = conn.transaction((rows: MessageRow[]) => {
-      for (const row of rows) this.stmtUpsertMessage.run(row);
+      // `mentions` is optional on MessageRow (rows from non-normalize sources
+      // may omit it), but the column is NOT NULL and better-sqlite3 rejects an
+      // undefined named param. Default to '[]' so the bind always succeeds.
+      for (const row of rows)
+        this.stmtUpsertMessage.run({ ...row, mentions: row.mentions ?? '[]' });
     });
     this.txMarkDeleted = conn.transaction((ids: string[]) => {
       for (const id of ids) this.stmtMarkDeleted.run(id);
@@ -218,6 +233,8 @@ export class Db {
       last_synced_at: room.last_synced_at ?? null,
       oldest_loaded_ts: room.oldest_loaded_ts ?? null,
       fully_backfilled: room.fully_backfilled ?? 0,
+      ls: room.ls ?? null,
+      tunread: room.tunread ?? '[]',
     });
   }
 
@@ -244,6 +261,21 @@ export class Db {
     return this.conn
       .prepare(`SELECT * FROM rooms ${where} ORDER BY name`)
       .all(params) as RoomRow[];
+  }
+
+  /**
+   * Rooms with anything unread: a positive unread count OR a non-empty tunread
+   * (unread thread replies even when the main-channel unread count is zero).
+   * Ordered by name for stable display. Read-only — never mutates read state.
+   */
+  findUnreadRooms(): RoomRow[] {
+    return this.conn
+      .prepare(
+        `SELECT * FROM rooms
+         WHERE unread > 0 OR (tunread IS NOT NULL AND tunread != '[]')
+         ORDER BY name`,
+      )
+      .all() as RoomRow[];
   }
 
   setRoomSyncState(rid: string, state: RoomSyncState): void {
@@ -347,6 +379,47 @@ export class Db {
         )} ORDER BY tlm DESC LIMIT @limit`,
       )
       .all(params) as MessageRow[];
+  }
+
+  /**
+   * Messages mentioning ANY of `usernames` (the user's own @handle, plus
+   * optionally 'all'/'here'), newest first. Read-only.
+   *
+   * Matches via SQLite's json_each table-valued function over the stored
+   * `mentions` JSON array — `EXISTS (SELECT 1 FROM json_each(messages.mentions)
+   * WHERE json_each.value IN (...))`. json_each is compiled into the
+   * better-sqlite3 SQLite build (verified at runtime in db.test.ts), so we use
+   * it directly rather than a fragile LIKE '%"name"%' scan that would also
+   * false-positive on substrings. Excludes soft-deleted rows and (when
+   * `sinceTs` is set) anything older than the watermark. The partial
+   * idx_messages_mentions index (rid, ts DESC WHERE mentions != '[]') backs the
+   * ORDER BY.
+   */
+  findMentions(
+    usernames: string[],
+    opts: { sinceTs?: string; limit?: number } = {},
+  ): MessageRow[] {
+    if (usernames.length === 0) return [];
+    const placeholders = usernames.map((_, i) => `@u${i}`).join(', ');
+    const params: Record<string, unknown> = {};
+    usernames.forEach((u, i) => {
+      params[`u${i}`] = u;
+    });
+
+    const clauses = [
+      'deleted = 0',
+      `EXISTS (SELECT 1 FROM json_each(messages.mentions) WHERE json_each.value IN (${placeholders}))`,
+    ];
+    if (opts.sinceTs !== undefined) {
+      clauses.push('ts >= @sinceTs');
+      params['sinceTs'] = opts.sinceTs;
+    }
+    let sql = `SELECT * FROM messages WHERE ${clauses.join(' AND ')} ORDER BY ts DESC`;
+    if (opts.limit !== undefined) {
+      sql += ' LIMIT @limit';
+      params['limit'] = opts.limit;
+    }
+    return this.conn.prepare(sql).all(params) as MessageRow[];
   }
 
   // ---- thread_sync --------------------------------------------------------

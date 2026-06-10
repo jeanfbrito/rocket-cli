@@ -1,5 +1,5 @@
 // MCP server: wraps the shared core (App) behind a stdio transport and
-// registers the twelve Rocket.Chat tools. stdout is reserved for the MCP
+// registers the seventeen Rocket.Chat tools. stdout is reserved for the MCP
 // protocol — every other byte of output goes to stderr via the core logger.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -7,6 +7,11 @@ import { createApp, type App } from '../core/app.js';
 import { log } from '../core/log.js';
 import { registerListRoomsTool } from './tools/list-rooms.js';
 import { registerGetMessagesTool } from './tools/get-messages.js';
+import { registerGetUnreadTool } from './tools/get-unread.js';
+import { registerGetMentionsTool } from './tools/get-mentions.js';
+import { registerGetAttentionTool } from './tools/get-attention.js';
+import { registerGetMessageContextTool } from './tools/get-message-context.js';
+import { registerOpenUrlTool } from './tools/open-url.js';
 import { registerGetThreadMessagesTool } from './tools/get-thread-messages.js';
 import { registerListThreadsTool } from './tools/list-threads.js';
 import { registerSearchMessagesTool } from './tools/search-messages.js';
@@ -18,11 +23,16 @@ import { registerDownloadAttachmentTool } from './tools/download-attachment.js';
 import { registerListCustomEmojisTool } from './tools/list-custom-emojis.js';
 import { registerGetCustomEmojiTool } from './tools/get-custom-emoji.js';
 
-/** Build a configured McpServer with all twelve tools registered against `app`. */
+/** Build a configured McpServer with all seventeen tools registered against `app`. */
 export function buildServer(app: App): McpServer {
   const server = new McpServer({ name: 'rocket-cli', version: '0.1.0' });
   registerListRoomsTool(server, app);
   registerGetMessagesTool(server, app);
+  registerGetUnreadTool(server, app);
+  registerGetMentionsTool(server, app);
+  registerGetAttentionTool(server, app);
+  registerGetMessageContextTool(server, app);
+  registerOpenUrlTool(server, app);
   registerGetThreadMessagesTool(server, app);
   registerListThreadsTool(server, app);
   registerSearchMessagesTool(server, app);

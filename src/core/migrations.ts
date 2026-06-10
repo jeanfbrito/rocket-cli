@@ -189,6 +189,52 @@ export const MIGRATIONS: Migration[] = [
       );`,
     ],
   },
+  {
+    // v4 — per-room unread state mirrored from the subscription record, so the
+    // read-only `unread` command / `get_unread` tool can slice exactly the
+    // messages that arrived since the user last read each room in the UI.
+    //
+    // `ls` is ISubscription.ls (a Date over the wire) — the "last seen" / last-read
+    // watermark the server maintains when the user opens a room. We store it as an
+    // ISO8601 TEXT so it compares lexicographically against messages.ts. NULL means
+    // the room has no read marker yet (never opened); the unread view then falls
+    // back to the unread-count newest-N approximation.
+    //
+    // `tunread` is ISubscription.tunread (string[] of thread parent ids with unread
+    // replies). Stored as a JSON array TEXT, default '[]' so the column is never
+    // NULL and JSON.parse always succeeds. (Fields verified in
+    // @rocket.chat/core-typings ISubscription: `ls?: Date`, `unread: number`,
+    // `tunread?: Array<string>`; subscriptions.get returns full ISubscription
+    // records per @rocket.chat/rest-typings subscriptionsEndpoints.)
+    version: 4,
+    statements: [
+      `ALTER TABLE rooms ADD COLUMN ls TEXT;`,
+      `ALTER TABLE rooms ADD COLUMN tunread TEXT NOT NULL DEFAULT '[]';`,
+    ],
+  },
+  {
+    // v5 — per-message mention list, so the read-only `mentions` command /
+    // `get_mentions` tool can find "what needs MY attention" across all cached
+    // rooms without a full-text scan.
+    //
+    // `mentions` is a JSON array TEXT of the *usernames* extracted from
+    // IMessage.mentions (a MessageMention[] of `{ _id, username?, name?, type? }`).
+    // We keep only the usernames (entries without one are skipped) plus the
+    // special channel-wide pseudo-users 'all' / 'here' (which arrive as
+    // `username`). Default '[]' so the column is never NULL and JSON.parse /
+    // json_each always succeed. Old rows cached before v5 stay '[]' until the
+    // room is re-synced — an honest, self-healing default.
+    //
+    // The partial index covers only rows that actually mention someone
+    // (mentions != '[]'), keyed (rid, ts DESC) to match the findMentions scan
+    // (newest first, grouped by room). Cheap: the vast majority of messages
+    // mention no one, so the index stays small.
+    version: 5,
+    statements: [
+      `ALTER TABLE messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]';`,
+      `CREATE INDEX idx_messages_mentions ON messages (rid, ts DESC) WHERE mentions != '[]';`,
+    ],
+  },
 ];
 
 /** Highest schema version defined by the migration set. */

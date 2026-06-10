@@ -4,10 +4,13 @@ import {
   type RcWireMessage,
   type RcWireSubscription,
   messageToRow,
+  permalink,
   rowToCompact,
+  rowToCompactWithLink,
   subscriptionToRoomRow,
   toIso,
 } from '../src/core/normalize.js';
+import type { RoomRow } from '../src/core/types.js';
 
 const RID = 'GENERAL';
 const TS = '2026-06-10T14:02:11.000Z';
@@ -135,6 +138,26 @@ describe('messageToRow', () => {
     const row = messageToRow(plain({ ts: { $date: ms } }), RID);
     expect(row.ts).toBe(TS);
   });
+
+  it('extracts mention usernames, skips entries without one, keeps all/here', () => {
+    const row = messageToRow(
+      plain({
+        mentions: [
+          { _id: 'u9', username: 'jean', name: 'Jean Brito', type: 'user' },
+          { _id: 'u8', name: 'No Handle' }, // no username → skipped
+          { _id: 'all', username: 'all' }, // channel-wide kept verbatim
+          { _id: 'here', username: 'here', type: 'user' },
+        ],
+      }),
+      RID,
+    );
+    expect(JSON.parse(row.mentions ?? '[]')).toEqual(['jean', 'all', 'here']);
+  });
+
+  it('defaults mentions to [] when absent or empty', () => {
+    expect(messageToRow(plain(), RID).mentions).toBe('[]');
+    expect(messageToRow(plain({ mentions: [] }), RID).mentions).toBe('[]');
+  });
 });
 
 describe('rowToCompact', () => {
@@ -185,8 +208,68 @@ describe('rowToCompact', () => {
   });
 });
 
+describe('permalink', () => {
+  const BASE = 'https://chat.example.com';
+  function room(over: Partial<RoomRow>): Pick<RoomRow, 'rid' | 'name' | 'fname' | 't'> {
+    return { rid: 'RID1', name: 'general', fname: 'General', t: 'c', ...over };
+  }
+
+  it('builds a channel link from the room name', () => {
+    expect(permalink(BASE, room({ t: 'c', name: 'general' }), 'm1')).toBe(
+      'https://chat.example.com/channel/general?msg=m1',
+    );
+  });
+
+  it('builds a private group link from the room name', () => {
+    expect(permalink(BASE, room({ t: 'p', name: 'secret-team' }), 'm2')).toBe(
+      'https://chat.example.com/group/secret-team?msg=m2',
+    );
+  });
+
+  it('builds a DM link from the room id (not usernames)', () => {
+    expect(permalink(BASE, room({ t: 'd', rid: 'abc123def', name: 'alice' }), 'm3')).toBe(
+      'https://chat.example.com/direct/abc123def?msg=m3',
+    );
+  });
+
+  it('URL-encodes the name segment', () => {
+    expect(permalink(BASE, room({ t: 'c', name: 'dev/ops & qa' }), 'm4')).toBe(
+      'https://chat.example.com/channel/dev%2Fops%20%26%20qa?msg=m4',
+    );
+  });
+
+  it('strips trailing slashes from the base URL', () => {
+    expect(permalink('https://chat.example.com///', room({ t: 'c', name: 'general' }), 'm5')).toBe(
+      'https://chat.example.com/channel/general?msg=m5',
+    );
+  });
+
+  it('falls back to fname then rid for the name segment', () => {
+    expect(permalink(BASE, room({ t: 'c', name: null, fname: 'Fancy Name' }), 'm6')).toBe(
+      'https://chat.example.com/channel/Fancy%20Name?msg=m6',
+    );
+    expect(permalink(BASE, room({ t: 'c', name: null, fname: null, rid: 'ROOMX' }), 'm7')).toBe(
+      'https://chat.example.com/channel/ROOMX?msg=m7',
+    );
+  });
+});
+
+describe('rowToCompactWithLink', () => {
+  it('attaches a link to the compact record', () => {
+    const compact = rowToCompactWithLink(
+      messageToRow(plain(), RID),
+      { rid: RID, name: 'general', fname: 'General', t: 'c' },
+      'https://chat.example.com',
+    );
+    expect(compact.link).toBe('https://chat.example.com/channel/general?msg=m1');
+    // Still produces the same base fields as rowToCompact.
+    expect(compact.id).toBe('m1');
+    expect(compact.author).toBe('jean');
+  });
+});
+
 describe('subscriptionToRoomRow', () => {
-  it('maps rid/name/fname/t/unread and sub_updated_at from _updatedAt', () => {
+  it('maps rid/name/fname/t/unread, sub_updated_at, ls and tunread', () => {
     const row = subscriptionToRoomRow({
       rid: RID,
       name: 'general',
@@ -194,7 +277,9 @@ describe('subscriptionToRoomRow', () => {
       t: 'c',
       unread: 5,
       _updatedAt: TS,
-    } satisfies RcWireSubscription);
+      ls: TS,
+      tunread: ['p1', 'p2'],
+    } as RcWireSubscription);
     expect(row).toEqual({
       rid: RID,
       name: 'general',
@@ -202,13 +287,17 @@ describe('subscriptionToRoomRow', () => {
       t: 'c',
       unread: 5,
       sub_updated_at: TS,
+      ls: TS,
+      tunread: '["p1","p2"]',
     });
   });
 
-  it('defaults unread to 0 and missing dates to null', () => {
+  it('defaults unread to 0, missing dates to null, and tunread to "[]"', () => {
     const row = subscriptionToRoomRow({ rid: RID, t: 'd' } satisfies RcWireSubscription);
     expect(row.unread).toBe(0);
     expect(row.sub_updated_at).toBeNull();
     expect(row.name).toBeNull();
+    expect(row.ls).toBeNull();
+    expect(row.tunread).toBe('[]');
   });
 });

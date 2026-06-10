@@ -109,6 +109,8 @@ describe('sendMessage', () => {
     expect(rc.posts[0]!.body).toMatchObject({ channel: '#general', text: 'hello' });
     expect(rc.posts[0]!.body).not.toHaveProperty('roomId');
     expect(compact.id).toBe('m1');
+    // The sent message carries a permalink (room is cached at send time).
+    expect(compact.link).toBe('http://example.com/channel/general?msg=m1');
   });
 
   it('resolves room name to roomId for bare room name target', async () => {

@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 import { withApp, printTable } from './util.js';
-import { rowToCompact } from '../../core/normalize.js';
+import { rowToCompact, rowToCompactWithLink } from '../../core/normalize.js';
 
 export function register(program: Command): void {
   program
@@ -28,7 +28,11 @@ export function register(program: Command): void {
           });
 
           if (command.optsWithGlobals<{ json?: boolean }>().json) {
-            process.stdout.write(JSON.stringify(rows.map((r) => rowToCompact(r))) + '\n');
+            process.stdout.write(
+              JSON.stringify(
+                rows.map((r) => rowToCompactWithLink(r, roomRow, app.config.url)),
+              ) + '\n',
+            );
             return;
           }
 
@@ -78,8 +82,12 @@ export function register(program: Command): void {
           const messages = app.db.getThreadMessages(id, { limit: count });
 
           if (command.optsWithGlobals<{ json?: boolean }>().json) {
+            const room = app.db.getRoom(parent.rid);
+            const toCompact = room
+              ? (r: typeof parent) => rowToCompactWithLink(r, room, app.config.url)
+              : rowToCompact;
             process.stdout.write(
-              JSON.stringify({ parent: rowToCompact(parent), messages: messages.map((r) => rowToCompact(r)) }) + '\n',
+              JSON.stringify({ parent: toCompact(parent), messages: messages.map(toCompact) }) + '\n',
             );
             return;
           }
