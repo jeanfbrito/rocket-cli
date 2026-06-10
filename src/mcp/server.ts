@@ -1,9 +1,12 @@
 // MCP server: wraps the shared core (App) behind a stdio transport and
-// registers the seventeen Rocket.Chat tools. stdout is reserved for the MCP
+// registers the Rocket.Chat tools — seventeen in normal mode, or fourteen in
+// read-only mode (config.readOnly), which drops the three write tools
+// (send_message, add_reaction, upload_file). stdout is reserved for the MCP
 // protocol — every other byte of output goes to stderr via the core logger.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createApp, type App } from '../core/app.js';
+import { isAllowed } from '../core/config.js';
 import { log } from '../core/log.js';
 import { registerListRoomsTool } from './tools/list-rooms.js';
 import { registerGetMessagesTool } from './tools/get-messages.js';
@@ -23,7 +26,13 @@ import { registerDownloadAttachmentTool } from './tools/download-attachment.js';
 import { registerListCustomEmojisTool } from './tools/list-custom-emojis.js';
 import { registerGetCustomEmojiTool } from './tools/get-custom-emoji.js';
 
-/** Build a configured McpServer with all seventeen tools registered against `app`. */
+/**
+ * Build a configured McpServer with the Rocket.Chat tools registered against
+ * `app`: all seventeen normally, or fourteen when `app.config.readOnly` is set
+ * — read-only mode omits the three server-write tools (send_message,
+ * add_reaction, upload_file). download_attachment stays (it only writes local
+ * disk, never the server).
+ */
 export function buildServer(app: App): McpServer {
   const server = new McpServer({ name: 'rocket-cli', version: '0.1.0' });
   registerListRoomsTool(server, app);
@@ -36,10 +45,10 @@ export function buildServer(app: App): McpServer {
   registerGetThreadMessagesTool(server, app);
   registerListThreadsTool(server, app);
   registerSearchMessagesTool(server, app);
-  registerSendMessageTool(server, app);
-  registerAddReactionTool(server, app);
+  if (isAllowed(app.config, 'send')) registerSendMessageTool(server, app);
+  if (isAllowed(app.config, 'react')) registerAddReactionTool(server, app);
   registerGetUserProfileTool(server, app);
-  registerUploadFileTool(server, app);
+  if (isAllowed(app.config, 'upload')) registerUploadFileTool(server, app);
   registerDownloadAttachmentTool(server, app);
   registerListCustomEmojisTool(server, app);
   registerGetCustomEmojiTool(server, app);
@@ -53,10 +62,10 @@ export function buildServer(app: App): McpServer {
  * transport is connected, so a broken config never speaks half-protocol on
  * stdout.
  */
-export async function runMcpServer(): Promise<void> {
+export async function runMcpServer(profileName?: string): Promise<void> {
   let app: App;
   try {
-    app = createApp();
+    app = createApp(undefined, profileName);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error(`Failed to start MCP server: ${msg}`);

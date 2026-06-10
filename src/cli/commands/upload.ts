@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import { withApp } from './util.js';
 import { uploadFile } from '../../core/files.js';
 import { messageToRow, rowToCompact } from '../../core/normalize.js';
+import { isAllowed } from '../../core/config.js';
 
 export function register(program: Command): void {
   program
@@ -19,6 +20,12 @@ export function register(program: Command): void {
         command: Command,
       ) => {
         await withApp(async (app) => {
+          if (!isAllowed(app.config, 'upload')) {
+            const who = app.config.profile ? `'${app.config.profile}'` : '(active config)';
+            process.stderr.write(`Error: profile ${who} is read-only; upload is disabled.\n`);
+            process.exitCode = 1;
+            return;
+          }
           const roomRow = await app.rooms.resolve(room);
           const { message } = await uploadFile(app.config, {
             rid: roomRow.rid,

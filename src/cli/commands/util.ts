@@ -4,14 +4,30 @@ import { ConfigError } from '../../core/config.js';
 import { log } from '../../core/log.js';
 
 /**
+ * The profile name resolved from the global `--profile` flag. Set once by the
+ * CLI's preAction hook (see cli/index.ts) before any command action runs, so
+ * every withApp call selects the same profile without threading the flag
+ * through 16 action signatures. `loadConfig` still falls back to
+ * ROCKET_CLI_PROFILE / defaultProfile when this is undefined.
+ */
+let activeProfile: string | undefined;
+
+/** Set the active profile (called by the CLI preAction hook). */
+export function setActiveProfile(name: string | undefined): void {
+  activeProfile = name;
+}
+
+/**
  * Create the App, run `fn`, and ensure the DB is closed on exit.
  * On ConfigError prints the message without a stack trace and exits 1.
  * On other errors, logs via stderr and sets exitCode = 1.
+ *
+ * The profile selected by the global `--profile` flag is applied automatically.
  */
 export async function withApp(fn: (app: App) => Promise<void>): Promise<void> {
   let app: App | undefined;
   try {
-    app = createApp();
+    app = createApp(undefined, activeProfile);
     await fn(app);
   } catch (err) {
     if (err instanceof ConfigError) {

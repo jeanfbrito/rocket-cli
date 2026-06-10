@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from '../src/core/config.js';
+import { loadConfig, isAllowed } from '../src/core/config.js';
 
 // ---------------------------------------------------------------------------
 // Small typed REST surface (admin + per-persona), raw fetch like core/files.ts
@@ -33,6 +33,16 @@ interface Auth {
 }
 
 const cfg = loadConfig();
+// Defense in depth: the seeder CREATES users/rooms and POSTS messages. A
+// read-only profile must never reach the network here, so abort immediately.
+if (!isAllowed(cfg, 'send')) {
+  process.stderr.write(
+    `Refusing to seed: the resolved config is read-only` +
+      `${cfg.profile ? ` (profile '${cfg.profile}')` : ''}. ` +
+      `Seeding writes to the server. Use a writable config/profile.\n`,
+  );
+  process.exit(1);
+}
 const BASE = cfg.url; // already trailing-slash-stripped by loadConfig
 const ADMIN: Auth = { token: cfg.token, userId: cfg.userId };
 

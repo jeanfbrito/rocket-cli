@@ -1,12 +1,17 @@
 {
   "mcpServers": {
-    "rocketchat": {
+    "rocketchat-test": {
       "command": "node",
       "args": ["dist/cli.js", "serve"],
       "env": {
-        "ROCKETCHAT_URL": "https://chat.example.com",
-        "ROCKETCHAT_TOKEN": "your-personal-access-token",
-        "ROCKETCHAT_USER_ID": "your-user-id"
+        "ROCKET_CLI_PROFILE": "test"
+      }
+    },
+    "rocketchat-work": {
+      "command": "node",
+      "args": ["dist/cli.js", "serve"],
+      "env": {
+        "ROCKET_CLI_PROFILE": "work"
       }
     }
   }

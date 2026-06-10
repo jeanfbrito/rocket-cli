@@ -227,6 +227,33 @@ export class Db {
     this.stmtSetMeta.run({ key, value });
   }
 
+  /**
+   * Bind this database file to a single (server URL, user id) identity.
+   *
+   * On the first use of a fresh db the identity is stamped into the meta table.
+   * On every subsequent open the stored identity MUST match the active config;
+   * a mismatch is a fatal error (thrown), never a silent overwrite — this makes
+   * cross-profile contamination impossible even if two profiles are pointed at
+   * the same db file or a db is reused across accounts. `onMismatch` builds the
+   * human-facing message (the caller knows the profile name + db path).
+   */
+  guardInstance(
+    url: string,
+    userId: string,
+    onMismatch: (stored: { url?: string; userId?: string }) => Error,
+  ): void {
+    const storedUrl = this.getMeta('instance_url');
+    const storedUserId = this.getMeta('instance_user_id');
+    if (storedUrl === undefined && storedUserId === undefined) {
+      this.setMeta('instance_url', url);
+      this.setMeta('instance_user_id', userId);
+      return;
+    }
+    if (storedUrl !== url || storedUserId !== userId) {
+      throw onMismatch({ url: storedUrl, userId: storedUserId });
+    }
+  }
+
   // ---- rooms --------------------------------------------------------------
 
   upsertRoom(room: RoomRow): void {

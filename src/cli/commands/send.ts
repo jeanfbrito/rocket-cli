@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import { withApp } from './util.js';
 import { sendMessage } from '../../core/app.js';
+import { isAllowed } from '../../core/config.js';
 
 export function register(program: Command): void {
   program
@@ -16,6 +17,12 @@ export function register(program: Command): void {
         command: Command,
       ) => {
         await withApp(async (app) => {
+          if (!isAllowed(app.config, 'send')) {
+            const who = app.config.profile ? `'${app.config.profile}'` : '(active config)';
+            process.stderr.write(`Error: profile ${who} is read-only; send is disabled.\n`);
+            process.exitCode = 1;
+            return;
+          }
           const text = textParts.join(' ');
           if (!text.trim()) {
             process.stderr.write('Error: message text cannot be empty.\n');

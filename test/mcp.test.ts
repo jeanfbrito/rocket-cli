@@ -136,8 +136,9 @@ function sub(over: Partial<RcSubscription>): RcSubscription {
   return { rid: 'r', name: 'name', fname: 'fname', t: 'c', unread: 0, ...over };
 }
 
-function makeApp(db: Db, rc: FakeRc, opts?: { emojiImages?: boolean }): App {
+function makeApp(db: Db, rc: FakeRc, opts?: { emojiImages?: boolean; readOnly?: boolean }): App {
   const emojiImages = opts?.emojiImages ?? true;
+  const readOnly = opts?.readOnly ?? false;
   const rooms = new RoomDirectory(db, rc as never);
   const emojis = new EmojiDirectory(
     db,
@@ -155,6 +156,7 @@ function makeApp(db: Db, rc: FakeRc, opts?: { emojiImages?: boolean }): App {
     ttlSeconds: 60,
     backfillLimit: 100,
     emojiImages,
+    readOnly,
   };
   return { config, db, rc: rc as never, rooms, emojis, sync, search };
 }
@@ -254,6 +256,34 @@ describe('mcp server', () => {
 
     const reaction = tools.find((t) => t.name === 'add_reaction')!;
     expect(reaction.annotations?.readOnlyHint).not.toBe(true);
+  });
+
+  it('read-only mode registers exactly fourteen tools (no write tools)', async () => {
+    const roDb = openDb(':memory:');
+    const roRc = new FakeRc();
+    const roApp = makeApp(roDb, roRc, { readOnly: true });
+    const roClient = await connect(roApp);
+    try {
+      const { tools } = await roClient.listTools();
+      expect(tools).toHaveLength(14);
+      const names = tools.map((t) => t.name);
+      expect(names).not.toContain('send_message');
+      expect(names).not.toContain('add_reaction');
+      expect(names).not.toContain('upload_file');
+      // download_attachment writes only local disk, so it stays available.
+      expect(names).toContain('download_attachment');
+
+      // Reads still work in read-only mode.
+      roRc.onSubscriptions({
+        update: [sub({ rid: 'C1', name: 'general', fname: 'General', t: 'c' })],
+        remove: [],
+      });
+      const res = await roClient.callTool({ name: 'list_rooms', arguments: {} });
+      expect(resultJson(res).returned).toBe(1);
+    } finally {
+      await roClient.close();
+      roDb.close();
+    }
   });
 
   it('list_rooms returns seeded rooms with type mapping', async () => {

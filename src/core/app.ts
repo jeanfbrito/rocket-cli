@@ -1,4 +1,4 @@
-import { loadConfig, type Config } from './config.js';
+import { loadConfig, ConfigError, type Config } from './config.js';
 import { openDb, type Db } from './db.js';
 import { RcClient } from './rc-client.js';
 import { RoomDirectory } from './rooms.js';
@@ -18,9 +18,29 @@ export interface App {
   search: SearchService;
 }
 
-export function createApp(config?: Config): App {
-  const cfg = config ?? loadConfig();
+export function createApp(config?: Config, profileName?: string): App {
+  const cfg = config ?? loadConfig(profileName);
   const db = openDb(cfg.dbPath);
+  // Bind the db file to this (server, user) identity so a profile can never
+  // read or write another server's cache. A fresh db is stamped; a mismatch is
+  // fatal. Skip for the ephemeral in-memory db used by tests.
+  if (cfg.dbPath !== ':memory:') {
+    try {
+      db.guardInstance(cfg.url, cfg.userId, (stored) => {
+        const who = cfg.profile ? `profile '${cfg.profile}'` : 'the current config';
+        return new ConfigError(
+          `Database ${cfg.dbPath} is bound to a different Rocket.Chat identity than ${who}.\n` +
+            `  stored:   url=${stored.url ?? '?'} userId=${stored.userId ?? '?'}\n` +
+            `  expected: url=${cfg.url} userId=${cfg.userId}\n` +
+            `Fix: point ${who} at the correct server, use the matching profile, ` +
+            `or delete the db to re-sync (rm ${cfg.dbPath}*).`,
+        );
+      });
+    } catch (err) {
+      db.close();
+      throw err;
+    }
+  }
   const rc = new RcClient({ url: cfg.url, token: cfg.token, userId: cfg.userId });
   const rooms = new RoomDirectory(db, rc, cfg.url);
   const emojis = new EmojiDirectory(

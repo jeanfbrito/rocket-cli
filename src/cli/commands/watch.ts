@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import { WatchService, MIN_INTERVAL_SECONDS, type WatchMatch } from '../../core/watch.js';
 import { withApp } from './util.js';
+import { isAllowed } from '../../core/config.js';
 
 /** Format a match for human stdout: `[HH:MM] #room @author: text`. */
 function formatMatch(m: WatchMatch): string {
@@ -34,6 +35,16 @@ export function register(program: Command): void {
         command: Command,
       ) => {
         await withApp(async (app) => {
+          // --notify posts each match to a room -> a write. Refuse it under a
+          // read-only profile (plain watching stays allowed; it is local FTS).
+          if (opts.notify && !isAllowed(app.config, 'send')) {
+            const who = app.config.profile ? `'${app.config.profile}'` : '(active config)';
+            process.stderr.write(
+              `Error: profile ${who} is read-only; --notify (which posts messages) is disabled.\n`,
+            );
+            process.exitCode = 1;
+            return;
+          }
           const json = command.optsWithGlobals<{ json?: boolean }>().json === true;
           const watch = new WatchService(app);
 

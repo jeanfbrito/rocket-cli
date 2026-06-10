@@ -522,3 +522,47 @@ describe('repository', () => {
     expect(db.findRooms().length).toBe(3);
   });
 });
+
+describe('guardInstance (identity binding)', () => {
+  let db: Db;
+
+  afterEach(() => {
+    db?.close();
+  });
+
+  const fail = (): Error => new Error('mismatch');
+
+  it('stamps identity into a fresh db and proceeds', () => {
+    db = openDb(':memory:');
+    expect(() => db.guardInstance('https://a.example.com', 'userA', fail)).not.toThrow();
+    expect(db.getMeta('instance_url')).toBe('https://a.example.com');
+    expect(db.getMeta('instance_user_id')).toBe('userA');
+  });
+
+  it('proceeds when the stored identity matches', () => {
+    db = openDb(':memory:');
+    db.setMeta('instance_url', 'https://a.example.com');
+    db.setMeta('instance_user_id', 'userA');
+    expect(() => db.guardInstance('https://a.example.com', 'userA', fail)).not.toThrow();
+  });
+
+  it('throws when the stored server URL differs (db from server A, config is server B)', () => {
+    db = openDb(':memory:');
+    db.setMeta('instance_url', 'https://a.example.com');
+    db.setMeta('instance_user_id', 'userA');
+    expect(() =>
+      db.guardInstance(
+        'https://b.example.com',
+        'userA',
+        (stored) => new Error(`stored=${stored.url} expected=https://b.example.com`),
+      ),
+    ).toThrow(/stored=https:\/\/a\.example\.com/);
+  });
+
+  it('throws when the stored user id differs', () => {
+    db = openDb(':memory:');
+    db.setMeta('instance_url', 'https://a.example.com');
+    db.setMeta('instance_user_id', 'userA');
+    expect(() => db.guardInstance('https://a.example.com', 'userB', fail)).toThrow('mismatch');
+  });
+});

@@ -80,9 +80,86 @@ rocket-cli search "deploy"
 
 Cache reset: `rm ~/.local/share/rocket-cli/cache.db*` — next run re-syncs from the server.
 
+## Multiple servers (profiles)
+
+Connect to more than one Rocket.Chat server with **named profiles**. Each profile carries its own URL, token, user id, and an **isolated database** — data is never mixed across servers.
+
+Profiles live in `~/.config/rocket-cli/profiles.json` (XDG-aware; `XDG_CONFIG_HOME` honored). The file holds tokens, so it is written `chmod 600` (owner read/write only) — keep it that way.
+
+```json
+{
+  "defaultProfile": "test",
+  "profiles": {
+    "test": {
+      "url": "https://test.example.com",
+      "token": "REPLACE_WITH_TEST_TOKEN",
+      "userId": "REPLACE_WITH_TEST_USER_ID"
+    },
+    "work": {
+      "url": "https://chat.company.com",
+      "token": "REPLACE_WITH_WORK_TOKEN",
+      "userId": "REPLACE_WITH_WORK_USER_ID",
+      "readOnly": true
+    }
+  }
+}
+```
+
+Optional per-profile fields: `db` (explicit database path), `readOnly`, `syncTtlSeconds`, `backfillLimit`, `emojiImages`.
+
+```sh
+# List profiles (name, url, db path, read-only, * = default). Tokens never printed.
+rocket-cli profiles
+
+# Add a profile (writes profiles.json with mode 600)
+rocket-cli profiles --add test --url https://test.example.com --token <t> --user-id <id>
+rocket-cli profiles --add work --url https://chat.company.com --token <t> --user-id <id> --read-only
+
+# Set the default profile (used when no --profile / ROCKET_CLI_PROFILE is given)
+rocket-cli profiles --default test
+
+# Use a profile for any command
+rocket-cli --profile work rooms
+rocket-cli --profile work attention
+ROCKET_CLI_PROFILE=work rocket-cli rooms   # env equivalent (handy for MCP)
+```
+
+**Resolution order**: an explicit `--profile` flag (or `ROCKET_CLI_PROFILE` env) selects a profile → the profile's connection identity (`url`, `token`, `userId`, `db`) is **authoritative** — ambient env vars and cwd `.env` values for those fields are ignored. Tuning knobs (`ROCKET_CLI_SYNC_TTL_SECONDS`, `ROCKET_CLI_BACKFILL_LIMIT`, `ROCKET_CLI_EMOJI_IMAGES`, `ROCKET_CLI_READ_ONLY`) may still be overridden by env when the profile omits them. With no profile and only env vars, behavior is exactly as before. A `defaultProfile` applies when nothing is explicitly selected **and `ROCKETCHAT_URL` is not already in the environment** (so legacy env-only setups remain untouched).
+
+**Per-profile database isolation**: a profile's db defaults to `~/.local/share/rocket-cli/<profile>.db` (override with the profile's `db` field). No profile uses the legacy `~/.local/share/rocket-cli/cache.db`. A database file is **bound on first use to the (server URL, user id) it was synced from** — opening it later under a different identity is a hard error (it tells you which profile/db/server mismatched and how to fix it), so cross-profile contamination is impossible.
+
+**Read-only mode** (`"readOnly": true`, or `--read-only` on `profiles --add`) is the safety mode for production / company servers. It blocks every server write:
+
+- MCP `serve` registers **14 tools instead of 17** — `send_message`, `add_reaction`, and `upload_file` are not exposed. All reads (including `download_attachment`, which only writes local disk) still work.
+- CLI `send`, `upload`, and `watch --notify` refuse with a clear error and exit 1.
+- `scripts/seed.ts` aborts immediately (it writes to the server).
+
+### Two MCP registrations for Claude Code
+
+Register one MCP server per profile, each `serve` with its `ROCKET_CLI_PROFILE` env — no flags needed. Make `work` read-only so the agent can read your company server but never post to it:
+
+```json
+{
+  "mcpServers": {
+    "rocketchat-test": {
+      "command": "node",
+      "args": ["/absolute/path/to/rocket-cli/dist/cli.js", "serve"],
+      "env": { "ROCKET_CLI_PROFILE": "test" }
+    },
+    "rocketchat-work": {
+      "command": "node",
+      "args": ["/absolute/path/to/rocket-cli/dist/cli.js", "serve"],
+      "env": { "ROCKET_CLI_PROFILE": "work" }
+    }
+  }
+}
+```
+
+See `.mcp.json.example` for a copy-paste starting point.
+
 ## CLI usage
 
-All commands accept `--json` for machine-readable output.
+All commands accept `--json` for machine-readable output and `--profile <name>` to select a named connection profile (see [Multiple servers](#multiple-servers-profiles)).
 
 ```sh
 # List rooms you belong to
@@ -149,6 +226,10 @@ node dist/cli.js emojis --export /tmp/emoji     # save every emoji image to a di
 
 # Start the MCP stdio server (used by Claude Code / Claude Desktop)
 node dist/cli.js serve
+
+# Manage named connection profiles (multiple servers)
+node dist/cli.js profiles
+node dist/cli.js profiles --add work --url https://chat.company.com --token <t> --user-id <id> --read-only
 ```
 
 ### `rooms` flags
@@ -319,7 +400,7 @@ The `-e` flag sets env vars scoped to this MCP server; they are not exported to 
 
 ## MCP tools
 
-Seventeen tools are exposed to the LLM agent:
+Seventeen tools are exposed to the LLM agent (fourteen under a read-only profile — the three write tools `send_message`, `add_reaction`, and `upload_file` are then withheld; see [Multiple servers](#multiple-servers-profiles)):
 
 | Tool | What it does | Key inputs |
 |---|---|---|
@@ -353,7 +434,7 @@ Attachment links appear in `get_messages` output as `[file] name -> /file-upload
 4. **Write-through sends** — `chat.postMessage` response is upserted into the local DB, so the sent message appears in the next `get_messages` without a sync round-trip.
 5. **Threads on demand** — `ensureThreadLoaded` checks `tcount` vs local reply count and backfills gaps via `chat.getThreadMessages`.
 
-**DB location**: `~/.local/share/rocket-cli/cache.db` (XDG data home). Override with `ROCKET_CLI_DB`.
+**DB location**: `~/.local/share/rocket-cli/cache.db` (XDG data home) for the default env-only config; each named profile uses its own `~/.local/share/rocket-cli/<profile>.db` (see [Multiple servers](#multiple-servers-profiles)). Override either with `ROCKET_CLI_DB` or a profile's `db` field.
 
 ## Server load and rate limits
 
@@ -364,7 +445,7 @@ rocket-cli is designed to minimize server pressure:
 | Mechanism | Detail |
 |---|---|
 | Concurrent requests | Global semaphore caps in-flight API calls at **2** at all times |
-| Cache-first reads | Repeat reads hit SQLite — zero network. Sync is TTL-gated (default 60 s) |
+| Cache-first reads | Repeat reads hit SQLite — zero network. Sync is TTL-gated (default 60 s). Each profile has its own isolated db |
 | Bounded backfills | Initial room backfill is capped at **500 messages / 30 days**, fetched in pages of 100 |
 | Late-join rooms | Rooms unsynced longer than the backfill window are re-backfilled in the same bounded pages rather than requesting an unbounded delta from the server's last watermark |
 | `watch` polling | Queries the local FTS5 index only — never hits a server-side search endpoint |
@@ -406,6 +487,7 @@ After the first sync the cache absorbs routine reads; typical interactive use ge
 | `ROCKET_CLI_SYNC_TTL_SECONDS` | no | `60` | How long before a cached room is considered stale |
 | `ROCKET_CLI_BACKFILL_LIMIT` | no | `500` | Max messages to fetch on initial room backfill |
 | `ROCKET_CLI_EMOJI_IMAGES` | no | `true` | Cache custom-emoji image bytes. `false`/`0` caches metadata only (no image fetch/storage) |
+| `ROCKET_CLI_PROFILE` | no | — | Select a named profile from `profiles.json` (equivalent to `--profile`); used by MCP registrations |
 
 ## Validating against your own server
 

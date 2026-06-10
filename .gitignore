@@ -5,3 +5,5 @@ dist
 *.db-wal
 *.db-shm
 scripts/.seed-credentials.json
+.env.*
+.localdev/
