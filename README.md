@@ -39,6 +39,14 @@ graph LR
 
 *Architecture at a glance: agents and humans share one Core; the SQLite cache absorbs most reads; the server is only hit on cache miss or write.*
 
+### Loading philosophy — network follows user value, never ambient
+
+Data is loaded in priority order of what you asked for; the cache accelerates but never blocks, and the tool never fetches history nobody requested:
+
+- **Triage is always shallow.** `get_unread` / `get_mentions` / `get_attention` fetch only the slice after each room's last-read watermark (`ts > ls`) — usually a handful of messages — not a full backfill. Answering "what's unread?" stays fast even on a cold cache with many unread rooms.
+- **Reading serves instantly, revalidates in the background.** `get_messages` / `list_threads` use stale-while-revalidate: a cached room is served immediately while a delta sync refreshes it in the background (the response carries `"refreshing": true` when that happens — the data may be seconds stale). A totally-cold room blocks only for one history page (≈100 messages, enough to answer) and then that room's remaining backfill completes in the background — because reading a room *is* the intent to have its recent history.
+- **Deep history is explicit only.** Full backfill happens when you ask for it: `rocket-cli sync [room] | --all` (blocking, human choice) or the `sync_history` MCP tool (an agent calls it when a task needs history beyond the recent window — e.g. "summarize the last month"). There is **no ambient background warmer** — the MCP server never progressively fills the database for data nobody asked about.
+
 ## What needs my attention
 
 The headline feature: one call answers "what did I miss?". `get_attention` (MCP) / `rocket-cli attention` (CLI) fuses mentions of you, unread DMs, unread thread replies, and unread channel messages into a single prioritized, deduplicated digest — a message that both mentions you and is unread appears once, in the mentions section, flagged `alsoUnread`. Every item carries a clickable Rocket.Chat link, and the whole flow is strictly read-only (it never clears a single unread badge). Paste any of those links back to the agent via `open_url` (or `rocket-cli open <url>`) and you get the surrounding conversation plus the ids needed to reply — a full triage-to-reply round-trip without leaving the chat.
@@ -130,7 +138,7 @@ ROCKET_CLI_PROFILE=work rocket-cli rooms   # env equivalent (handy for MCP)
 
 **Read-only mode** (`"readOnly": true`, or `--read-only` on `profiles --add`) is the safety mode for production / company servers. It blocks every server write:
 
-- MCP `serve` registers **14 tools instead of 17** — `send_message`, `add_reaction`, and `upload_file` are not exposed. All reads (including `download_attachment`, which only writes local disk) still work.
+- MCP `serve` registers **15 tools instead of 18** — `send_message`, `add_reaction`, and `upload_file` are not exposed. All reads (including `download_attachment` and `sync_history`, which only write local disk / the local cache) still work.
 - CLI `send`, `upload`, and `watch --notify` refuse with a clear error and exit 1.
 - `scripts/seed.ts` aborts immediately (it writes to the server).
 
@@ -400,7 +408,7 @@ The `-e` flag sets env vars scoped to this MCP server; they are not exported to 
 
 ## MCP tools
 
-Seventeen tools are exposed to the LLM agent (fourteen under a read-only profile — the three write tools `send_message`, `add_reaction`, and `upload_file` are then withheld; see [Multiple servers](#multiple-servers-profiles)):
+Eighteen tools are exposed to the LLM agent (fifteen under a read-only profile — the three write tools `send_message`, `add_reaction`, and `upload_file` are then withheld; see [Multiple servers](#multiple-servers-profiles)):
 
 | Tool | What it does | Key inputs |
 |---|---|---|
@@ -413,6 +421,7 @@ Seventeen tools are exposed to the LLM agent (fourteen under a read-only profile
 | `open_url` | Open any pasted Rocket.Chat link (message, thread, or channel) and return its content + the ids needed to reply/react | `url`, `count?` (1-100, default 20) |
 | `get_thread_messages` | Read a full thread (parent + replies) | `threadId` (parent message id), `count?` (default 50) |
 | `list_threads` | List active threads in a room by last activity | `room`, `count?` (default 25), `text?` (filter parent text) |
+| `sync_history` | Load older history for one room into the local cache — use only when a task needs history beyond what `get_messages` returns; routine triage never needs it (read-only; writes only the local cache) | `room?` (omit = most stale unread room), `depth?` (default backfill limit) |
 | `search_messages` | Full-text search across all cached rooms | `query`, `room?` (scopes + enables server fallback), `author?`, `limit?` (default 20) |
 | `send_message` | Post to a room or reply in a thread | `target` (#channel/@user/name/id), `text`, `threadId?` |
 | `add_reaction` | Add or remove an emoji reaction on a message | `messageId`, `emoji` (colon-wrapping optional), `remove?` (bool, default false) |
@@ -422,7 +431,7 @@ Seventeen tools are exposed to the LLM agent (fourteen under a read-only profile
 | `list_custom_emojis` | List custom emojis registered on this server (beyond unicode) | `filter?` (name substring) |
 | `get_custom_emoji` | Show a custom emoji's image (returns image content) | `name` (with or without colons) |
 
-`get_messages` and `list_threads` return an envelope with `room`, `syncedThrough`, and `coverage` so the agent knows the freshness and depth of the cached data. Thread parents in `get_messages` carry a `replyCount`; pass that message's `id` as `threadId` to `get_thread_messages`.
+`get_messages` and `list_threads` return an envelope with `room`, `syncedThrough`, and `coverage` so the agent knows the freshness and depth of the cached data, plus `"refreshing": true` when the answer was served from cache while a background sync revalidates it (data may be seconds stale). Thread parents in `get_messages` carry a `replyCount`; pass that message's `id` as `threadId` to `get_thread_messages`.
 
 Attachment links appear in `get_messages` output as `[file] name -> /file-upload/…`; pass the part after `->` as `fileUrl` to `download_attachment`.
 

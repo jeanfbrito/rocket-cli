@@ -1,5 +1,5 @@
 // MCP server: wraps the shared core (App) behind a stdio transport and
-// registers the Rocket.Chat tools — seventeen in normal mode, or fourteen in
+// registers the Rocket.Chat tools — eighteen in normal mode, or fifteen in
 // read-only mode (config.readOnly), which drops the three write tools
 // (send_message, add_reaction, upload_file). stdout is reserved for the MCP
 // protocol — every other byte of output goes to stderr via the core logger.
@@ -17,6 +17,7 @@ import { registerGetMessageContextTool } from './tools/get-message-context.js';
 import { registerOpenUrlTool } from './tools/open-url.js';
 import { registerGetThreadMessagesTool } from './tools/get-thread-messages.js';
 import { registerListThreadsTool } from './tools/list-threads.js';
+import { registerSyncHistoryTool } from './tools/sync-history.js';
 import { registerSearchMessagesTool } from './tools/search-messages.js';
 import { registerSendMessageTool } from './tools/send-message.js';
 import { registerAddReactionTool } from './tools/add-reaction.js';
@@ -28,10 +29,10 @@ import { registerGetCustomEmojiTool } from './tools/get-custom-emoji.js';
 
 /**
  * Build a configured McpServer with the Rocket.Chat tools registered against
- * `app`: all seventeen normally, or fourteen when `app.config.readOnly` is set
+ * `app`: all eighteen normally, or fifteen when `app.config.readOnly` is set
  * — read-only mode omits the three server-write tools (send_message,
- * add_reaction, upload_file). download_attachment stays (it only writes local
- * disk, never the server).
+ * add_reaction, upload_file). download_attachment and sync_history stay (they
+ * only write local disk / the local cache, never the server).
  */
 export function buildServer(app: App): McpServer {
   const server = new McpServer({ name: 'rocket-cli', version: '0.1.0' });
@@ -44,6 +45,7 @@ export function buildServer(app: App): McpServer {
   registerOpenUrlTool(server, app);
   registerGetThreadMessagesTool(server, app);
   registerListThreadsTool(server, app);
+  registerSyncHistoryTool(server, app);
   registerSearchMessagesTool(server, app);
   if (isAllowed(app.config, 'send')) registerSendMessageTool(server, app);
   if (isAllowed(app.config, 'react')) registerAddReactionTool(server, app);

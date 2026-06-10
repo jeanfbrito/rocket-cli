@@ -58,6 +58,9 @@ export interface AttentionReport {
   searchedSince: string;
   /** ISO8601 timestamp this digest was assembled (caller clock). */
   generatedAt: string;
+  /** True when a background sync was kicked for any room while assembling this
+   *  digest — data reflects the local cache and a fresher delta is landing. */
+  refreshing: boolean;
 }
 
 export interface CollectAttentionOptions {
@@ -171,5 +174,6 @@ export async function collectAttention(
     totals,
     searchedSince: mentionsReport.searchedSince,
     generatedAt: new Date().toISOString(),
+    refreshing: mentionsReport.refreshing || unreadReport.refreshing,
   };
 }

@@ -20,7 +20,9 @@ export function register(program: Command): void {
           const count = Math.max(1, parseInt(opts.count, 10) || 30);
           const roomRow = await app.rooms.resolve(room);
 
-          await app.sync.ensureRoomSynced(roomRow.rid);
+          // Read path: serve from cache, revalidate in background (cold rooms
+          // block for one page then deepen that room in the background).
+          await app.sync.ensureRoomSyncedSWR(roomRow.rid);
 
           // Extend backfill if the requested `before` point is older than what
           // we have loaded (mirror of the logic in sync.ts / MCP get_messages).

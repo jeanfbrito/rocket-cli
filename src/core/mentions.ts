@@ -39,6 +39,9 @@ export interface MentionsReport {
   totals: { rooms: number; messages: number };
   /** ISO8601 lower bound applied to the search (ts >= searchedSince). */
   searchedSince: string;
+  /** True when a background sync was kicked while freshening an unread room —
+   *  the answer reflects the local cache and a fresher delta is landing. */
+  refreshing: boolean;
 }
 
 export interface CollectMentionsOptions {
@@ -95,8 +98,17 @@ export async function collectMentions(
   // Fresh subscriptions, then freshen the rooms where unread activity lives —
   // mentions almost always arrive in a room that now shows unread.
   await app.rooms.refresh();
+  let refreshing = false;
   for (const room of app.db.findUnreadRooms()) {
-    await app.sync.ensureRoomSynced(room.rid);
+    // Shallow freshening (same rationale as collectUnread): a never-synced
+    // unread room only needs the window after its last-read watermark for
+    // triage; the FTS query bounds the mention search itself. `ls` is the exact
+    // lower bound, with a 24h fallback when the room has never been opened. An
+    // already-synced room serves from cache and revalidates in the background.
+    const since =
+      room.ls ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const outcome = await app.sync.ensureRoomSyncedShallow(room.rid, since);
+    if (outcome.refreshing) refreshing = true;
   }
 
   const searchedSince = new Date(
@@ -144,5 +156,6 @@ export async function collectMentions(
     mentions,
     totals: { rooms: mentions.length, messages: totalMessages },
     searchedSince,
+    refreshing,
   };
 }

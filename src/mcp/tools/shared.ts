@@ -59,18 +59,24 @@ export interface ReadEnvelope {
   room: { id: string; name: string; type: 'channel' | 'group' | 'dm' };
   syncedThrough: string | null;
   coverage: string;
+  /** Present and true when a background sync was kicked for this room: the
+   *  messages reflect the local cache and a fresher delta is landing. Omitted
+   *  when the served data is already current. */
+  refreshing?: true;
   messages: CompactMessage[];
 }
 
 /** Build the read envelope, attaching a permalink to each message. Pass the
  *  raw rows (not pre-compacted records) so the link can be composed from the
- *  room + base URL here, keeping every read surface consistent. */
+ *  room + base URL here, keeping every read surface consistent. `refreshing`
+ *  flags a background revalidation kicked by the SWR read path. */
 export function readEnvelope(
   room: RoomRow,
   rows: MessageRow[],
   baseUrl: string,
+  refreshing = false,
 ): ReadEnvelope {
-  return {
+  const envelope: ReadEnvelope = {
     room: {
       id: room.rid,
       name: room.name ?? room.fname ?? room.rid,
@@ -80,4 +86,6 @@ export function readEnvelope(
     coverage: coverageOf(room),
     messages: rows.map((r) => rowToCompactWithLink(r, room, baseUrl)),
   };
+  if (refreshing) envelope.refreshing = true;
+  return envelope;
 }

@@ -24,6 +24,27 @@ const PAGE_SIZE = 100;
 /** Hard cap on delta pagination loops, guarding against a server that keeps
  *  returning a non-null cursor forever. */
 const MAX_DELTA_PAGES = 50;
+/** Hard cap on shallow-sync pagination. A never-synced unread room is triaged
+ *  with at most this many history pages from the last-read watermark forward —
+ *  bursts larger than 3*PAGE_SIZE messages are intentionally truncated (a
+ *  timeline read will lazily deepen via extendBackfill if the room is opened).
+ *  Honesty over completeness for the "what's unread" view. */
+const MAX_SHALLOW_PAGES = 3;
+/** A foreground read on a totally-cold room blocks for this many history pages
+ *  (enough to answer "show me recent messages") and then background-completes
+ *  THAT room's remaining backfill. One page = 100 messages. */
+const COLD_FIRST_PAGES = 1;
+
+/**
+ * Outcome of a sync request. `refreshing` is true when a background (un-awaited)
+ * sync was kicked and fresher data will land shortly — read paths thread this
+ * into their envelope/report so the client knows the answer may be seconds
+ * stale. False means the served data is already current (fresh cache or a
+ * blocking sync that just completed).
+ */
+export interface SyncOutcome {
+  refreshing: boolean;
+}
 
 /** Narrow a room type to the three values getHistory accepts; anything else
  *  (e.g. a malformed payload) defaults to channels.history, matching the prior
@@ -69,11 +90,112 @@ export class SyncEngine {
   }
 
   /**
-   * Ensure the room's cache is up to date: backfill if never synced, delta if
-   * stale, no-op if fresh. Coalesced per room.
+   * Ensure the room's cache is up to date and return whether a background
+   * refresh is in progress.
+   *
+   * Default (`blocking: true`) preserves the original contract: backfill if
+   * never synced, delta if stale, no-op if fresh — all awaited. The returned
+   * outcome is always `{ refreshing: false }` because the caller waited.
+   *
+   * Stale-while-revalidate (`blocking: false`) — for READ paths that want the
+   * cache to accelerate, never block:
+   *   - Room has cached data and is merely TTL-stale → serve immediately and
+   *     kick the delta un-awaited (deduped via the per-room mutex; errors to
+   *     log.debug). Returns `{ refreshing: true }`.
+   *   - Room is totally cold (never synced / no local data) → we cannot serve
+   *     nothing, so block on the FIRST backfill page only (COLD_FIRST_PAGES),
+   *     then kick the remainder of the backfill in the background. Returns
+   *     `{ refreshing: true }`.
+   *   - Room is fresh → no-op, `{ refreshing: false }`.
+   *
+   * `force` still forces a (blocking) re-sync regardless of TTL.
    */
-  ensureRoomSynced(rid: string, opts?: { force?: boolean }): Promise<void> {
-    return this.withRoomLock(rid, () => this.doEnsureRoomSynced(rid, opts));
+  ensureRoomSynced(
+    rid: string,
+    opts?: { force?: boolean; blocking?: boolean },
+  ): Promise<SyncOutcome> {
+    const blocking = opts?.blocking ?? true;
+    if (blocking) {
+      return this.withRoomLock(rid, () =>
+        this.doEnsureRoomSynced(rid, opts),
+      ).then(() => ({ refreshing: false }));
+    }
+    return this.doEnsureRoomSyncedSWR(rid, opts);
+  }
+
+  /**
+   * Non-blocking variant. Resolves the room (may refresh the directory once),
+   * then decides synchronously from the cached row whether to block (cold) or
+   * serve-and-kick (warm-stale). Read paths should prefer this.
+   */
+  async ensureRoomSyncedSWR(
+    rid: string,
+    opts?: { force?: boolean },
+  ): Promise<SyncOutcome> {
+    return this.doEnsureRoomSyncedSWR(rid, opts);
+  }
+
+  private async doEnsureRoomSyncedSWR(
+    rid: string,
+    opts?: { force?: boolean },
+  ): Promise<SyncOutcome> {
+    let room = this.db.getRoom(rid);
+    if (!room) {
+      await this.rooms.refresh();
+      room = this.db.getRoom(rid);
+      if (!room) {
+        throw new Error(
+          `Room "${rid}" not found after refreshing subscriptions — ` +
+            'you may not be a member, or the id is invalid.',
+        );
+      }
+    }
+
+    const hasLocalData =
+      room.last_synced_at != null || room.oldest_loaded_ts != null;
+
+    // Totally cold: we have nothing to serve. Block on the first backfill page
+    // only (enough to answer the read), then complete the depth in background.
+    if (!hasLocalData) {
+      const r = room;
+      await this.withRoomLock(rid, () =>
+        this.backfill(r, { maxPages: COLD_FIRST_PAGES }),
+      );
+      // If the first page did not exhaust the room, deepen the rest in the
+      // background so a later "show older" read is already covered.
+      const after = this.db.getRoom(rid);
+      const refreshing = after?.fully_backfilled !== 1;
+      if (refreshing) this.kickBackgroundBackfill(rid);
+      return { refreshing };
+    }
+
+    // Warm: decide staleness without touching the network.
+    const stale =
+      opts?.force === true ||
+      room.last_synced_at == null ||
+      Date.now() - Date.parse(room.last_synced_at) > this.ttlMs;
+    if (!stale) return { refreshing: false };
+
+    // Stale but cached → serve now, revalidate in background.
+    this.kickBackgroundSync(rid, opts);
+    return { refreshing: true };
+  }
+
+  /**
+   * Fire-and-forget a foreground-equivalent sync for a room. Deduped by the
+   * per-room mutex: if a sync is already in flight, withRoomLock returns that
+   * promise and we do NOT stack a second one. Errors are swallowed to
+   * log.debug — a background refresh failing must never surface to the caller
+   * (the served stale data is still valid). Idempotent and abort-safe: on
+   * process exit the in-flight upserts simply stop.
+   */
+  private kickBackgroundSync(rid: string, opts?: { force?: boolean }): void {
+    void this.withRoomLock(rid, () => this.doEnsureRoomSynced(rid, opts)).catch(
+      (err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.debug(`Background sync for room ${rid} failed: ${msg}`);
+      },
+    );
   }
 
   private async doEnsureRoomSynced(
@@ -97,9 +219,23 @@ export class SyncEngine {
       return;
     }
 
+    await this.syncedRoomDelta(room, opts);
+  }
+
+  /**
+   * Reconcile an already-synced room (last_synced_at set): no-op if fresh,
+   * bounded re-backfill if the watermark predates the backfill window, delta
+   * otherwise. Extracted so ensureRoomSyncedShallow can reuse it WITHOUT
+   * re-entering ensureRoomSynced (which would coalesce onto the in-flight
+   * shallow promise it is already running under and return a no-op).
+   */
+  private async syncedRoomDelta(
+    room: RoomRow,
+    opts?: { force?: boolean },
+  ): Promise<void> {
     const stale =
       opts?.force === true ||
-      Date.now() - Date.parse(room.last_synced_at) > this.ttlMs;
+      Date.now() - Date.parse(room.last_synced_at!) > this.ttlMs;
     if (stale) {
       // Stale-delta guard: chat.syncMessages on the lastUpdate path uses
       // handleWithoutPagination — it returns EVERY update since the watermark
@@ -111,7 +247,7 @@ export class SyncEngine {
       // room as first-touch and re-backfill instead.
       const backfillCutoffMs =
         Date.now() - this.backfillDays * 24 * 60 * 60 * 1000;
-      if (Date.parse(room.last_synced_at) < backfillCutoffMs) {
+      if (Date.parse(room.last_synced_at!) < backfillCutoffMs) {
         log.debug(
           `Room ${room.rid} last synced ${room.last_synced_at} predates the ` +
             `${this.backfillDays}-day backfill window; resetting to a bounded ` +
@@ -125,18 +261,132 @@ export class SyncEngine {
     // else: fresh — zero network.
   }
 
+  // ---- shallow sync -------------------------------------------------------
+
+  /**
+   * Triage-oriented sync for the "what's unread" view. Cheap by construction:
+   * a never-synced unread room's actual unread payload is just the messages
+   * after the last-read watermark (`sinceTs`) — usually a handful — so we fetch
+   * only that window instead of running the full backfill (500 msgs / 5 pages).
+   *
+   *  - Already synced (last_synced_at set): delegate to ensureRoomSynced. The
+   *    delta path is already a single cheap syncMessages call.
+   *  - Never synced: ONE forward history window from `sinceTs` (paged at most
+   *    MAX_SHALLOW_PAGES for an unread burst), then record a "shallowly known"
+   *    sync state — last_synced_at watermarked before the fetch (future deltas
+   *    work normally), oldest_loaded_ts = sinceTs, fully_backfilled = 0. A later
+   *    timeline read going older than sinceTs triggers extendBackfill naturally,
+   *    giving lazy full history exactly when someone actually reads the room.
+   *
+   * Shares the per-room mutex with ensureRoomSynced, so a concurrent shallow +
+   * full call coalesce onto whichever is already in flight.
+   */
+  ensureRoomSyncedShallow(rid: string, sinceTs: string): Promise<SyncOutcome> {
+    return this.doEnsureRoomSyncedShallow(rid, sinceTs);
+  }
+
+  private async doEnsureRoomSyncedShallow(
+    rid: string,
+    sinceTs: string,
+  ): Promise<SyncOutcome> {
+    let room = this.db.getRoom(rid);
+    if (!room) {
+      await this.rooms.refresh();
+      room = this.db.getRoom(rid);
+      if (!room) {
+        throw new Error(
+          `Room "${rid}" not found after refreshing subscriptions — ` +
+            'you may not be a member, or the id is invalid.',
+        );
+      }
+    }
+
+    // Already known: serve from cache, revalidate the delta in the background.
+    // The delta is cheap, but a triage view must never block on it — the unread
+    // slice is already in the local cache (it was synced before).
+    if (room.last_synced_at != null) {
+      const stale = Date.now() - Date.parse(room.last_synced_at) > this.ttlMs;
+      if (!stale) return { refreshing: false };
+      this.kickBackgroundSync(rid);
+      return { refreshing: true };
+    }
+
+    // Never synced: bounded forward window from the last-read watermark. This
+    // blocks — the slice IS the answer the triage view needs to return.
+    const cold = room;
+    return this.withRoomLock(rid, () =>
+      this.shallowBackfill(cold, sinceTs),
+    ).then(() => ({ refreshing: false }));
+  }
+
+  private async shallowBackfill(room: RoomRow, sinceTs: string): Promise<void> {
+    const syncStart = new Date().toISOString();
+    const roomType = historyRoomType(room.t);
+    let latest: string | undefined; // first page: from now backwards to sinceTs
+
+    for (let page = 0; page < MAX_SHALLOW_PAGES; page++) {
+      const res = await this.rc.getHistory(roomType, {
+        roomId: room.rid,
+        oldest: sinceTs,
+        count: PAGE_SIZE,
+        showThreadMessages: true,
+        ...(latest !== undefined && { latest }),
+      });
+      const messages = res.messages ?? [];
+      if (messages.length > 0) {
+        this.db.upsertMessages(messages.map((m) => messageToRow(m, room.rid)));
+      }
+
+      // Short page → the whole [sinceTs, now] window is loaded.
+      if (messages.length < PAGE_SIZE) break;
+
+      // Full page → there may be more unread within the window. Page backwards
+      // from the oldest ts seen (bounded by sinceTs via the `oldest` param).
+      let minMs = Number.POSITIVE_INFINITY;
+      for (const m of messages) {
+        const iso = messageToRow(m, room.rid).ts;
+        const ms = Date.parse(iso);
+        if (!Number.isNaN(ms) && ms < minMs) minMs = ms;
+      }
+      if (!Number.isFinite(minMs)) break;
+      latest = new Date(minMs - 1).toISOString();
+
+      if (page === MAX_SHALLOW_PAGES - 1) {
+        log.debug(
+          `Shallow sync for room ${room.rid} hit the ${MAX_SHALLOW_PAGES}-page ` +
+            'cap; the unread burst exceeds ~300 messages and is truncated for ' +
+            'triage. A timeline read will deepen it via extendBackfill.',
+        );
+      }
+    }
+
+    this.db.setRoomSyncState(room.rid, {
+      lastSyncedAt: syncStart,
+      oldestLoadedTs: sinceTs,
+      fullyBackfilled: false,
+    });
+  }
+
   // ---- backfill -----------------------------------------------------------
 
-  private async backfill(room: RoomRow): Promise<void> {
+  private async backfill(
+    room: RoomRow,
+    opts?: { maxPages?: number },
+  ): Promise<void> {
     // Watermark BEFORE the first fetch: anything that arrives mid-sync gets
     // re-fetched on the next delta. Upserts are idempotent, so duplicates are
     // harmless.
     const syncStart = new Date().toISOString();
     const roomType = historyRoomType(room.t);
     const cutoffMs = Date.now() - this.backfillDays * 24 * 60 * 60 * 1000;
+    // Page budget: undefined = run to completion (backfillLimit / exhaustion).
+    // A finite cap (cold first-page read) stops early WITHOUT marking the room
+    // fully_backfilled, so a later background pass / warmer finishes the depth.
+    const maxPages = opts?.maxPages;
 
     let latest: string | undefined; // first call: now (omit param)
     let total = 0;
+    let pages = 0;
     let oldestSeen: string | null = null;
     let fullyBackfilled = false;
 
@@ -185,12 +435,34 @@ export class SyncEngine {
       }
       // Hit the configured depth limit.
       if (total >= this.backfillLimit) break;
+      // Hit the per-call page cap (cold first-page read). Leaves
+      // fully_backfilled = false so a background pass finishes the depth.
+      pages++;
+      if (maxPages !== undefined && pages >= maxPages) break;
     }
 
     this.db.setRoomSyncState(room.rid, {
       lastSyncedAt: syncStart,
       oldestLoadedTs: oldestSeen,
       fullyBackfilled,
+    });
+  }
+
+  /**
+   * Background depth-completion for a room that a cold read populated with only
+   * its first page. Deepens via extendBackfill to the full backfill window (the
+   * same depth a blocking backfill would reach), fire-and-forget, deduped by
+   * the per-room mutex, errors to log.debug. Abort-safe (idempotent upserts).
+   */
+  private kickBackgroundBackfill(rid: string): void {
+    const room = this.db.getRoom(rid);
+    if (!room || room.oldest_loaded_ts == null) return;
+    const target = new Date(
+      Date.now() - this.backfillDays * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    void this.extendBackfill(rid, target).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.debug(`Background backfill for room ${rid} failed: ${msg}`);
     });
   }
 
@@ -425,6 +697,101 @@ export class SyncEngine {
       oldestLoadedTs: oldestSeen,
       fullyBackfilled,
     });
+  }
+
+  // ---- intent-driven depth ------------------------------------------------
+
+  /**
+   * Deepen ONE room's cached history on demand. Intent-driven — the opposite of
+   * an ambient warmer: depth is loaded only when a caller explicitly asks (CLI
+   * `sync`, or the `sync_history` MCP tool an agent calls when its task needs
+   * history beyond the recent window). Never auto-invoked.
+   *
+   * `depth` caps how many additional older messages to pull this call (default
+   * backfillLimit). A never-synced room runs a fresh backfill; a shallow/partial
+   * room deepens backwards via extendBackfill toward the backfill-day window.
+   * Coalesced by the per-room mutex (shares with any in-flight foreground sync).
+   *
+   * Returns the post-deepen state: how many net-new non-deleted messages landed,
+   * whether the room is now fully backfilled, and the backfill horizon.
+   */
+  async deepenRoom(
+    rid: string,
+    depth?: number,
+  ): Promise<{
+    rid: string;
+    messagesLoaded: number;
+    fullyBackfilled: boolean;
+    oldestLoadedTs: string | null;
+  }> {
+    let room = this.db.getRoom(rid);
+    if (!room) {
+      await this.rooms.refresh();
+      room = this.db.getRoom(rid);
+      if (!room) {
+        throw new Error(
+          `Room "${rid}" not found after refreshing subscriptions — ` +
+            'you may not be a member, or the id is invalid.',
+        );
+      }
+    }
+
+    const before = this.countRoomMessages(rid);
+    const cold = room.last_synced_at == null && room.oldest_loaded_ts == null;
+
+    if (room.fully_backfilled !== 1) {
+      if (cold) {
+        // Never touched: a fresh backfill (bounded by depth or backfillLimit).
+        const r = room;
+        const maxPages =
+          depth !== undefined ? Math.max(1, Math.ceil(depth / PAGE_SIZE)) : undefined;
+        await this.withRoomLock(rid, () => this.backfill(r, { maxPages }));
+      } else {
+        // Shallow/partial: page backwards toward the backfill-day window. The
+        // depth cap is enforced by backfillLimit inside extendBackfill; we bound
+        // the target at the configured window.
+        const target = new Date(
+          Date.now() - this.backfillDays * 24 * 60 * 60 * 1000,
+        ).toISOString();
+        await this.extendBackfill(rid, target);
+      }
+    }
+
+    const after = this.db.getRoom(rid) ?? room;
+    return {
+      rid,
+      messagesLoaded: Math.max(0, this.countRoomMessages(rid) - before),
+      fullyBackfilled: after.fully_backfilled === 1,
+      oldestLoadedTs: after.oldest_loaded_ts ?? null,
+    };
+  }
+
+  /**
+   * Pick the most-stale unread room to deepen when `sync_history` is called with
+   * no room argument: among rooms with current unread/alert activity that are
+   * not yet fully backfilled, the one synced longest ago (nulls — never synced —
+   * first). Returns null when nothing qualifies. Read-only.
+   */
+  pickStaleUnreadRoom(): string | null {
+    const candidates = this.db
+      .findUnreadRooms()
+      .filter((r) => r.fully_backfilled !== 1);
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => {
+      const av = a.last_synced_at == null ? 0 : Date.parse(a.last_synced_at);
+      const bv = b.last_synced_at == null ? 0 : Date.parse(b.last_synced_at);
+      return av - bv; // oldest / never-synced first
+    });
+    return candidates[0]!.rid;
+  }
+
+  private countRoomMessages(rid: string): number {
+    const row = this.db.conn
+      .prepare(
+        'SELECT COUNT(*) AS n FROM messages WHERE rid = ? AND deleted = 0',
+      )
+      .get(rid) as { n: number };
+    return row.n;
   }
 
   // ---- thread parent seeding ---------------------------------------------

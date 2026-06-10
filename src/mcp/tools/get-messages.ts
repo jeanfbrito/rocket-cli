@@ -14,7 +14,9 @@ export function registerGetMessagesTool(server: McpServer, app: App): void {
         'the full thread. Thread replies are not shown inline here. Use ' +
         'list_rooms first to find the room. Use before/after (ISO 8601 ' +
         'timestamps) to page through history; reading older than the cached ' +
-        'window transparently fetches more from the server.',
+        'window transparently fetches more from the server. Served from the ' +
+        'local cache for speed: when "refreshing": true the data may be ' +
+        'seconds stale and a fresher copy is loading in the background.',
       inputSchema: {
         room: z
           .string()
@@ -45,10 +47,14 @@ export function registerGetMessagesTool(server: McpServer, app: App): void {
       try {
         const roomRow = await app.rooms.resolve(room);
         const rid = roomRow.rid;
-        await app.sync.ensureRoomSynced(rid);
+        // Read path: stale-while-revalidate. A cold room blocks for one history
+        // page then deepens that room in the background; a warm-stale room
+        // serves the cache instantly and revalidates the delta in the
+        // background. Either way the answer is never gated on a full sync.
+        const outcome = await app.sync.ensureRoomSyncedSWR(rid);
 
         // If the requested window starts at/below our backfill horizon, pull
-        // older history first so the read is complete.
+        // older history first so the read is complete (explicit page-back intent).
         const refreshed = app.db.getRoom(rid) ?? roomRow;
         if (
           before !== undefined &&
@@ -66,7 +72,9 @@ export function registerGetMessagesTool(server: McpServer, app: App): void {
           includeSystem,
         });
         const finalRoom = app.db.getRoom(rid) ?? refreshed;
-        return ok(readEnvelope(finalRoom, rows, app.config.url));
+        return ok(
+          readEnvelope(finalRoom, rows, app.config.url, outcome.refreshing),
+        );
       } catch (err) {
         return fail(err);
       }

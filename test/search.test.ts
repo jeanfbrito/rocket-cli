@@ -47,13 +47,14 @@ function msg(id: string, over: Partial<MessageRow> = {}): MessageRow {
   };
 }
 
-/** Fake sync that records ensureRoomSynced calls. */
+/** Fake sync that records ensureRoomSyncedSWR calls. */
 function fakeSync(): SyncLike & { calls: string[] } {
   const calls: string[] = [];
   return {
     calls,
-    async ensureRoomSynced(rid: string): Promise<void> {
+    async ensureRoomSyncedSWR(rid: string): Promise<{ refreshing: boolean }> {
       calls.push(rid);
+      return { refreshing: false };
     },
   };
 }
@@ -314,7 +315,7 @@ describe('SearchService.search', () => {
     expect(res.note).toMatch(/server search unavailable/i);
   });
 
-  it('calls ensureRoomSynced when a room is passed', async () => {
+  it('calls ensureRoomSyncedSWR when a room is passed', async () => {
     db = openDb(':memory:');
     seedRoom();
     db.upsertMessages([msg('m1', { text: 'syncme content' })]);
@@ -326,7 +327,7 @@ describe('SearchService.search', () => {
     expect(sync.calls).toEqual(['r1']);
   });
 
-  it('does NOT call ensureRoomSynced when no room is passed', async () => {
+  it('does NOT call ensureRoomSyncedSWR when no room is passed', async () => {
     db = openDb(':memory:');
     seedRoom();
     db.upsertMessages([msg('m1', { text: 'syncme content' })]);

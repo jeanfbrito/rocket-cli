@@ -62,6 +62,11 @@ export interface UnreadRoom {
 export interface UnreadReport {
   rooms: UnreadRoom[];
   totals: { rooms: number; messages: number; threads: number };
+  /** True when a background sync was kicked for one or more rooms while
+   *  assembling this report — the data is current as of the local cache but a
+   *  fresher delta is landing. Lets the client label the answer honestly
+   *  ("data may be seconds stale; refreshing in background"). */
+  refreshing: boolean;
 }
 
 export interface CollectUnreadOptions {
@@ -110,17 +115,20 @@ export async function collectUnread(
   const rooms: UnreadRoom[] = [];
   let totalMessages = 0;
   let totalThreads = 0;
+  let refreshing = false;
 
   for (const room of unreadRooms) {
     const collected = await collectRoom(app, room, limit, includeThreads);
-    totalMessages += collected.messages.length;
-    totalThreads += collected.unreadThreads.length;
-    rooms.push(collected);
+    totalMessages += collected.room.messages.length;
+    totalThreads += collected.room.unreadThreads.length;
+    if (collected.refreshing) refreshing = true;
+    rooms.push(collected.room);
   }
 
   return {
     rooms,
     totals: { rooms: rooms.length, messages: totalMessages, threads: totalThreads },
+    refreshing,
   };
 }
 
@@ -129,8 +137,16 @@ async function collectRoom(
   room: RoomRow,
   limit: number,
   includeThreads: boolean,
-): Promise<UnreadRoom> {
-  await app.sync.ensureRoomSynced(room.rid);
+): Promise<{ room: UnreadRoom; refreshing: boolean }> {
+  // Shallow sync: the unread payload is just messages after the last-read
+  // watermark, so for a never-synced room we fetch only that window instead of
+  // the full backfill. `ls` is the exact lower bound; with no watermark (room
+  // never opened) fall back to the last 24h, which bounds the fetch while still
+  // covering recent activity. An already-synced room serves from cache and
+  // revalidates the delta in the background (refreshing = true).
+  const since =
+    room.ls ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const outcome = await app.sync.ensureRoomSyncedShallow(room.rid, since);
 
   const baseUrl = app.config.url;
   const toCompact = (r: MessageRow): CompactMessage =>
@@ -177,14 +193,17 @@ async function collectRoom(
 
   return {
     room: {
-      id: room.rid,
-      name: room.name ?? room.fname ?? room.rid,
-      type: roomTypeLabel(room.t),
+      room: {
+        id: room.rid,
+        name: room.name ?? room.fname ?? room.rid,
+        type: roomTypeLabel(room.t),
+      },
+      unreadCount: room.unread,
+      activityOnly,
+      approximate,
+      messages,
+      unreadThreads,
     },
-    unreadCount: room.unread,
-    activityOnly,
-    approximate,
-    messages,
-    unreadThreads,
+    refreshing: outcome.refreshing,
   };
 }

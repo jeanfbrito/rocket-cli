@@ -35,12 +35,15 @@ export function registerListThreadsTool(server: McpServer, app: App): void {
       try {
         const roomRow = await app.rooms.resolve(room);
         const rid = roomRow.rid;
-        await app.sync.ensureRoomSynced(rid);
+        // Read path: serve from cache, revalidate in background.
+        const outcome = await app.sync.ensureRoomSyncedSWR(rid);
         await app.sync.seedThreadParents(rid);
 
         const parents = app.db.getThreadParents(rid, { limit: count, textLike: text });
         const finalRoom = app.db.getRoom(rid) ?? roomRow;
-        return ok(readEnvelope(finalRoom, parents, app.config.url));
+        return ok(
+          readEnvelope(finalRoom, parents, app.config.url, outcome.refreshing),
+        );
       } catch (err) {
         return fail(err);
       }

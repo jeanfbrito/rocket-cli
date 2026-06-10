@@ -15,7 +15,9 @@ import type { CompactMessage, MessageRow, RoomRow } from './types.js';
  * hard dependency on it and stays unit-testable with a fake.
  */
 export interface SyncLike {
-  ensureRoomSynced(rid: string): Promise<void>;
+  /** Non-blocking room freshen: serve from cache, revalidate in background.
+   *  Search is a read path — it must not block on a delta. */
+  ensureRoomSyncedSWR(rid: string): Promise<{ refreshing: boolean }>;
 }
 
 /** A single search hit: the compact record plus retrieval metadata. */
@@ -94,7 +96,8 @@ export class SearchService {
     const room = opts.room;
 
     if (room) {
-      await this.sync.ensureRoomSynced(room.rid);
+      // Read path: serve from whatever is cached, revalidate in background.
+      await this.sync.ensureRoomSyncedSWR(room.rid);
     }
 
     const local = this.searchLocal(query, opts, limit);

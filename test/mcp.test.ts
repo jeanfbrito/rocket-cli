@@ -201,11 +201,11 @@ describe('mcp server', () => {
     db?.close();
   });
 
-  it('lists exactly seventeen tools with readOnlyHint on the read tools', async () => {
+  it('lists exactly eighteen tools with readOnlyHint on the read tools', async () => {
     client = await connect(app);
     const { tools } = await client.listTools();
 
-    expect(tools).toHaveLength(17);
+    expect(tools).toHaveLength(18);
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
@@ -225,6 +225,7 @@ describe('mcp server', () => {
         'open_url',
         'search_messages',
         'send_message',
+        'sync_history',
         'upload_file',
       ].sort(),
     );
@@ -248,6 +249,7 @@ describe('mcp server', () => {
         'list_threads',
         'open_url',
         'search_messages',
+        'sync_history',
       ].sort(),
     );
 
@@ -258,20 +260,22 @@ describe('mcp server', () => {
     expect(reaction.annotations?.readOnlyHint).not.toBe(true);
   });
 
-  it('read-only mode registers exactly fourteen tools (no write tools)', async () => {
+  it('read-only mode registers exactly fifteen tools (no write tools)', async () => {
     const roDb = openDb(':memory:');
     const roRc = new FakeRc();
     const roApp = makeApp(roDb, roRc, { readOnly: true });
     const roClient = await connect(roApp);
     try {
       const { tools } = await roClient.listTools();
-      expect(tools).toHaveLength(14);
+      expect(tools).toHaveLength(15);
       const names = tools.map((t) => t.name);
       expect(names).not.toContain('send_message');
       expect(names).not.toContain('add_reaction');
       expect(names).not.toContain('upload_file');
       // download_attachment writes only local disk, so it stays available.
       expect(names).toContain('download_attachment');
+      // sync_history writes only the local cache, so it stays available.
+      expect(names).toContain('sync_history');
 
       // Reads still work in read-only mode.
       roRc.onSubscriptions({
@@ -625,6 +629,37 @@ describe('mcp server', () => {
     expect(text).toMatch(/Invalid emoji/);
     expect(text).toMatch(/rocketcli/);
     expect(text).toMatch(/list_custom_emojis/);
+  });
+
+  it('sync_history deepens an explicit room and reports messagesLoaded + coverage', async () => {
+    db.upsertRoom({ rid: 'C1', name: 'general', fname: 'General', t: 'c', unread: 0, sub_updated_at: null });
+    rc.onSubscriptions({ update: [{ rid: 'C1', name: 'general', fname: 'General', t: 'c', unread: 0 }], remove: [] });
+    // A single short history page → fully backfilled.
+    rc.onHistory({
+      messages: [
+        { _id: 'h1', rid: 'C1', msg: 'older one', ts: '2026-06-01T00:01:00.000Z', u: { _id: 'u1', username: 'alice' } },
+        { _id: 'h2', rid: 'C1', msg: 'older two', ts: '2026-06-01T00:02:00.000Z', u: { _id: 'u2', username: 'bob' } },
+      ],
+    });
+    client = await connect(app);
+
+    const res = await client.callTool({ name: 'sync_history', arguments: { room: '#general' } });
+    const payload = resultJson(res);
+
+    expect(payload.room.id).toBe('C1');
+    expect(payload.messagesLoaded).toBe(2);
+    expect(payload.coverage).toBe('full');
+  });
+
+  it('sync_history with no room reports nothing-to-do when all rooms are read', async () => {
+    rc.onSubscriptions({ update: [{ rid: 'C1', name: 'general', fname: 'General', t: 'c', unread: 0 }], remove: [] });
+    db.upsertRoom({ rid: 'C1', name: 'general', fname: 'General', t: 'c', unread: 0, sub_updated_at: null });
+    client = await connect(app);
+
+    const res = await client.callTool({ name: 'sync_history', arguments: {} });
+    const payload = resultJson(res);
+    expect(payload.room).toBeNull();
+    expect(payload.messagesLoaded).toBe(0);
   });
 });
 

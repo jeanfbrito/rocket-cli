@@ -206,6 +206,165 @@ describe('SyncEngine backfill', () => {
   });
 });
 
+describe('SyncEngine ensureRoomSyncedShallow', () => {
+  let db: Db;
+  afterEach(() => db?.close());
+
+  it('never-synced room: ONE history call with oldest=sinceTs, shallow sync state', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    const base = Date.parse('2026-06-10T12:00:00.000Z');
+    const sinceTs = new Date(base - 60 * 60 * 1000).toISOString();
+
+    const rc = new FakeRc().on(HIST, (params) => {
+      // Triage window: oldest pinned to the watermark, count 100, threads on.
+      expect(params['oldest']).toBe(sinceTs);
+      expect(params['count']).toBe(100);
+      expect(params['showThreadMessages']).toBe(true);
+      // No `latest` on the first page.
+      expect(params['latest']).toBeUndefined();
+      // Short page → window fully loaded in one call.
+      const messages = Array.from({ length: 5 }, (_, i) =>
+        rcMsg(`u${i}`, base - i * 1000),
+      );
+      return { messages };
+    });
+
+    const before = new Date().toISOString();
+    const engine = makeEngine(db, rc, fakeRooms(db));
+    await engine.ensureRoomSyncedShallow('r1', sinceTs);
+
+    expect(rc.countOf(HIST)).toBe(1);
+    const count = (db.conn.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n;
+    expect(count).toBe(5);
+
+    const r = db.getRoom('r1')!;
+    // Watermark before the fetch; horizon at sinceTs; not fully backfilled.
+    expect(r.last_synced_at).toBeDefined();
+    expect(r.last_synced_at! >= before).toBe(true);
+    expect(r.oldest_loaded_ts).toBe(sinceTs);
+    expect(r.fully_backfilled).toBe(0);
+  });
+
+  it('already-synced room: delegates to delta (one syncMessages, zero history)', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1', { last_synced_at: '2026-06-10T10:00:00.000Z' }));
+    const base = Date.parse('2026-06-10T11:00:00.000Z');
+
+    const rc = new FakeRc()
+      .on(SYNC, () => ({
+        result: { updated: [rcMsg('d1', base)], deleted: [], cursor: { next: null, previous: null } },
+      }))
+      .on(HIST, () => {
+        throw new Error('history must not be called for an already-synced shallow sync');
+      });
+
+    // TTL 0 → stale → delta path.
+    const engine = makeEngine(db, rc, fakeRooms(db), { ttlSeconds: 0 });
+    await engine.ensureRoomSyncedShallow('r1', '2026-06-10T09:00:00.000Z');
+
+    expect(rc.countOf(SYNC)).toBe(1);
+    expect(rc.countOf(HIST)).toBe(0);
+    expect(db.getMessage('d1')).toBeDefined();
+  });
+
+  it('burst paging: full pages page backwards until a short page (100 + 100 + 30)', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    const base = Date.parse('2026-06-10T12:00:00.000Z');
+    const sinceTs = new Date(base - 24 * 60 * 60 * 1000).toISOString();
+
+    const rc = new FakeRc().on(HIST, (params, n) => {
+      // Every page keeps `oldest` pinned to the watermark.
+      expect(params['oldest']).toBe(sinceTs);
+      if (n === 0) {
+        expect(params['latest']).toBeUndefined();
+        return { messages: Array.from({ length: 100 }, (_, i) => rcMsg(`p1-${i}`, base - i * 1000)) };
+      }
+      if (n === 1) {
+        // Second page must page backwards from the oldest of page 1.
+        expect(params['latest']).toBe(new Date(base - 99 * 1000 - 1).toISOString());
+        return { messages: Array.from({ length: 100 }, (_, i) => rcMsg(`p2-${i}`, base - (100 + i) * 1000)) };
+      }
+      // Third page: short → stop.
+      return { messages: Array.from({ length: 30 }, (_, i) => rcMsg(`p3-${i}`, base - (200 + i) * 1000)) };
+    });
+
+    const engine = makeEngine(db, rc, fakeRooms(db));
+    await engine.ensureRoomSyncedShallow('r1', sinceTs);
+
+    expect(rc.countOf(HIST)).toBe(3);
+    const count = (db.conn.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n;
+    expect(count).toBe(230);
+    expect(db.getRoom('r1')!.oldest_loaded_ts).toBe(sinceTs);
+  });
+
+  it('caps at MAX_SHALLOW_PAGES (3) and stores a partial burst when full pages persist', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    const base = Date.parse('2026-06-10T12:00:00.000Z');
+    const sinceTs = new Date(base - 24 * 60 * 60 * 1000).toISOString();
+    // Always returns full pages → would page forever without the cap.
+    let serial = 0;
+    const rc = new FakeRc().on(HIST, () => {
+      const messages = Array.from({ length: 100 }, () => {
+        const m = rcMsg(`m${serial}`, base - serial * 1000);
+        serial++;
+        return m;
+      });
+      return { messages };
+    });
+
+    const engine = makeEngine(db, rc, fakeRooms(db));
+    await engine.ensureRoomSyncedShallow('r1', sinceTs);
+
+    // Capped at 3 pages; partial (300 stored), still shallow state.
+    expect(rc.countOf(HIST)).toBe(3);
+    const count = (db.conn.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n;
+    expect(count).toBe(300);
+    const r = db.getRoom('r1')!;
+    expect(r.fully_backfilled).toBe(0);
+    expect(r.oldest_loaded_ts).toBe(sinceTs);
+  });
+
+  it('after a shallow sync, a read older than sinceTs deepens via extendBackfill', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    const base = Date.parse('2026-06-10T12:00:00.000Z');
+    const sinceTs = new Date(base - 60 * 60 * 1000).toISOString();
+
+    let phase: 'shallow' | 'extend' = 'shallow';
+    const rc = new FakeRc().on(HIST, (params) => {
+      if (phase === 'shallow') {
+        expect(params['oldest']).toBe(sinceTs);
+        // Window covered in one short page.
+        return { messages: [rcMsg('u0', base - 1000)] };
+      }
+      // extendBackfill: no `oldest`, pages backwards from the horizon (sinceTs).
+      expect(params['oldest']).toBeUndefined();
+      expect(params['latest']).toBe(sinceTs);
+      const sinceMs = Date.parse(sinceTs);
+      return { messages: Array.from({ length: 10 }, (_, i) => rcMsg(`o${i}`, sinceMs - (i + 1) * 1000)) };
+    });
+
+    const engine = makeEngine(db, rc, fakeRooms(db));
+    await engine.ensureRoomSyncedShallow('r1', sinceTs);
+    expect(rc.countOf(HIST)).toBe(1);
+    expect(db.getRoom('r1')!.oldest_loaded_ts).toBe(sinceTs);
+
+    // Now a timeline read wants history older than sinceTs → extendBackfill
+    // fires (oldest_loaded_ts=sinceTs, fully_backfilled=0 make it eligible).
+    phase = 'extend';
+    const target = new Date(Date.parse(sinceTs) - 5 * 1000).toISOString();
+    await engine.extendBackfill('r1', target);
+
+    expect(rc.countOf(HIST)).toBe(2);
+    expect(db.getMessage('o0')).toBeDefined();
+    const r = db.getRoom('r1')!;
+    expect(r.oldest_loaded_ts! < sinceTs).toBe(true);
+  });
+});
+
 describe('SyncEngine missing room', () => {
   let db: Db;
   afterEach(() => db?.close());
@@ -488,5 +647,195 @@ describe('SyncEngine extendBackfill', () => {
     // The page reached the requested point, so the loop stops on target
     // coverage (not on exhaustion) → fully_backfilled stays 0.
     expect(r.oldest_loaded_ts! <= target).toBe(true);
+  });
+});
+
+describe('SyncEngine stale-while-revalidate (ensureRoomSyncedSWR)', () => {
+  let db: Db;
+  afterEach(() => db?.close());
+
+  it('warm-stale room serves INSTANTLY (does not await the delta) and kicks it in the background', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1', { last_synced_at: '2026-06-10T10:00:00.000Z' }));
+
+    // The delta NEVER resolves. If the read awaited it, this test would hang.
+    let deltaStarted = false;
+    let releaseDelta: () => void = () => {};
+    const deltaHeld = new Promise<void>((r) => (releaseDelta = r));
+    const rc = new FakeRc().on(SYNC, async () => {
+      deltaStarted = true;
+      await deltaHeld; // hang forever (until we release in cleanup)
+      return { result: { updated: [], deleted: [], cursor: { next: null, previous: null } } };
+    });
+
+    // TTL 0 → stale. SWR must return promptly with refreshing: true.
+    const engine = makeEngine(db, rc, fakeRooms(db), { ttlSeconds: 0 });
+    const outcome = await engine.ensureRoomSyncedSWR('r1');
+
+    expect(outcome.refreshing).toBe(true);
+    // The background delta was kicked (its handler began running) but the read
+    // returned without awaiting it.
+    await Promise.resolve();
+    expect(deltaStarted).toBe(true);
+    releaseDelta(); // let the dangling promise settle so the test exits cleanly
+  });
+
+  it('warm-FRESH room is a no-op: refreshing false, zero network', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1', { last_synced_at: new Date().toISOString() }));
+    const rc = new FakeRc();
+    const engine = makeEngine(db, rc, fakeRooms(db), { ttlSeconds: 3600 });
+    const outcome = await engine.ensureRoomSyncedSWR('r1');
+    expect(outcome.refreshing).toBe(false);
+    expect(rc.total()).toBe(0);
+  });
+
+  it('totally-cold room BLOCKS for one history page only, then background-deepens', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1')); // never synced, no local data
+    const base = Date.parse('2026-06-10T12:00:00.000Z');
+
+    // Gate every history call after the first so the background deepen cannot
+    // outrun the assertions: the first page resolves immediately, later pages
+    // block on `gate` (which we release at the end). Always full pages → without
+    // the one-page block this would page forever.
+    let serial = 0;
+    let callsAtUnblock = 0;
+    let releaseGate: () => void = () => {};
+    const gate = new Promise<void>((r) => (releaseGate = r));
+    const rc = new FakeRc().on(HIST, async (_params, n) => {
+      if (n >= 1) {
+        // A background page started — record and hold it.
+        callsAtUnblock++;
+        await gate;
+      }
+      const messages = Array.from({ length: 100 }, () => {
+        const m = rcMsg(`m${serial}`, base - serial * 1000);
+        serial++;
+        return m;
+      });
+      return { messages };
+    });
+
+    const engine = makeEngine(db, rc, fakeRooms(db), { backfillLimit: 500 });
+    const outcome = await engine.ensureRoomSyncedSWR('r1');
+
+    // The AWAITED (blocking) work was exactly one page: 100 messages persisted
+    // before SWR returned, room not yet fully backfilled, refreshing flagged.
+    expect(
+      (db.conn.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n,
+    ).toBe(100);
+    expect(outcome.refreshing).toBe(true);
+    expect(db.getRoom('r1')!.fully_backfilled).toBe(0);
+
+    // Let the background deepen proceed; it continues paging past page 1.
+    releaseGate();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(callsAtUnblock).toBeGreaterThanOrEqual(1);
+    expect(rc.countOf(HIST)).toBeGreaterThan(1);
+  });
+
+  it('blocking ensureRoomSynced still awaits fully and reports refreshing false', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1', { last_synced_at: '2026-06-10T10:00:00.000Z' }));
+    const base = Date.parse('2026-06-10T11:00:00.000Z');
+    const rc = new FakeRc().on(SYNC, () => ({
+      result: { updated: [rcMsg('d1', base)], deleted: [], cursor: { next: null, previous: null } },
+    }));
+    const engine = makeEngine(db, rc, fakeRooms(db), { ttlSeconds: 0 });
+    const outcome = await engine.ensureRoomSynced('r1');
+    expect(outcome.refreshing).toBe(false);
+    expect(db.getMessage('d1')).toBeDefined();
+  });
+
+  it('does not stack a second background sync while one is in flight (mutex dedupe)', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1', { last_synced_at: '2026-06-10T10:00:00.000Z' }));
+    let releaseDelta: () => void = () => {};
+    const held = new Promise<void>((r) => (releaseDelta = r));
+    const rc = new FakeRc().on(SYNC, async () => {
+      await held;
+      return { result: { updated: [], deleted: [], cursor: { next: null, previous: null } } };
+    });
+    const engine = makeEngine(db, rc, fakeRooms(db), { ttlSeconds: 0 });
+
+    // Two back-to-back SWR reads while stale: the first kicks the delta, the
+    // second must coalesce onto the in-flight one (no second syncMessages).
+    await engine.ensureRoomSyncedSWR('r1');
+    await engine.ensureRoomSyncedSWR('r1');
+    await Promise.resolve();
+    expect(rc.countOf(SYNC)).toBe(1);
+    releaseDelta();
+  });
+});
+
+describe('SyncEngine intent-driven depth (deepenRoom / pickStaleUnreadRoom)', () => {
+  let db: Db;
+  afterEach(() => db?.close());
+
+  it('deepenRoom backfills a never-synced room and reports messagesLoaded', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    const base = Date.parse('2026-06-10T12:00:00.000Z');
+    const rc = new FakeRc().on(HIST, (_params, n) => {
+      if (n === 0) {
+        return { messages: Array.from({ length: 100 }, (_, i) => rcMsg(`p1-${i}`, base - i * 1000)) };
+      }
+      return { messages: Array.from({ length: 20 }, (_, i) => rcMsg(`p2-${i}`, base - (100 + i) * 1000)) };
+    });
+    const engine = makeEngine(db, rc, fakeRooms(db), { backfillLimit: 500 });
+    const res = await engine.deepenRoom('r1');
+    expect(res.messagesLoaded).toBe(120);
+    expect(res.fullyBackfilled).toBe(true);
+    expect(db.getRoom('r1')!.fully_backfilled).toBe(1);
+  });
+
+  it('deepenRoom on a shallow room pages backwards via extendBackfill', async () => {
+    db = openDb(':memory:');
+    // Shallow: synced + horizon set, not fully backfilled (the shallow-sync state).
+    const oldest = '2026-06-10T12:00:00.000Z';
+    db.upsertRoom(room('r1', { last_synced_at: oldest, oldest_loaded_ts: oldest }));
+    const oldestMs = Date.parse(oldest);
+    const rc = new FakeRc().on(HIST, (params) => {
+      expect(params['latest']).toBe(oldest); // starts at the horizon
+      return { messages: Array.from({ length: 30 }, (_, i) => rcMsg(`old${i}`, oldestMs - (i + 1) * 1000)) };
+    });
+    const engine = makeEngine(db, rc, fakeRooms(db));
+    const res = await engine.deepenRoom('r1');
+    expect(res.messagesLoaded).toBe(30);
+    // Short page → exhausted → fully backfilled.
+    expect(res.fullyBackfilled).toBe(true);
+  });
+
+  it('deepenRoom is a no-op on an already fully-backfilled room', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1', { last_synced_at: '2026-06-10T10:00:00.000Z', fully_backfilled: 1, oldest_loaded_ts: '2026-06-01T00:00:00.000Z' }));
+    const rc = new FakeRc();
+    const engine = makeEngine(db, rc, fakeRooms(db));
+    const res = await engine.deepenRoom('r1');
+    expect(res.messagesLoaded).toBe(0);
+    expect(res.fullyBackfilled).toBe(true);
+    expect(rc.total()).toBe(0);
+  });
+
+  it('pickStaleUnreadRoom picks the never-synced unread room over a synced one', async () => {
+    db = openDb(':memory:');
+    // C1: unread, never synced (last_synced_at null) → highest priority.
+    db.upsertRoom(room('C1', { unread: 3 }));
+    // C2: unread but recently synced (still partial).
+    db.upsertRoom(room('C2', { unread: 1, last_synced_at: new Date().toISOString() }));
+    // C3: fully backfilled → excluded.
+    db.upsertRoom(room('C3', { unread: 5, last_synced_at: new Date().toISOString(), fully_backfilled: 1 }));
+    const rc = new FakeRc();
+    const engine = makeEngine(db, rc, fakeRooms(db));
+    expect(engine.pickStaleUnreadRoom()).toBe('C1');
+  });
+
+  it('pickStaleUnreadRoom returns null when nothing qualifies', async () => {
+    db = openDb(':memory:');
+    db.upsertRoom(room('C1', { unread: 0, alert: 0, tunread: '[]' }));
+    const rc = new FakeRc();
+    const engine = makeEngine(db, rc, fakeRooms(db));
+    expect(engine.pickStaleUnreadRoom()).toBeNull();
   });
 });

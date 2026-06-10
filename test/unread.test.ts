@@ -300,6 +300,75 @@ describe('collectUnread', () => {
     expect(report.totals).toEqual({ rooms: 0, messages: 0, threads: 0 });
   });
 
+  it('SWR: an already-synced but stale unread room serves from cache and flags refreshing', async () => {
+    // Build an app whose sync TTL is 0 so an already-synced room is stale and
+    // takes the SWR serve-now-revalidate-later branch.
+    const swrDb = openDb(':memory:');
+    const swrRc = new RecordingRc();
+    const rooms = new RoomDirectory(swrDb, swrRc as never);
+    const emojis = new EmojiDirectory(swrDb, swrRc as never, { url: 'http://example.com', token: 'tok', userId: 'uid' }, true);
+    const swrSync = new SyncEngine(swrDb, swrRc as never, rooms, { ttlSeconds: 0, backfillLimit: 100 });
+    const search = new SearchService(swrDb, swrRc as never, swrSync, 'http://example.com');
+    const swrApp = {
+      config: { url: 'http://example.com', token: 'tok', userId: 'uid', dbPath: ':memory:', ttlSeconds: 0, backfillLimit: 100, emojiImages: true },
+      db: swrDb, rc: swrRc as never, rooms, emojis, sync: swrSync, search,
+    } as unknown as App;
+
+    const ls = '2026-06-10T12:00:00.000Z';
+    swrRc.onSubscriptions({ update: [sub({ rid: 'C1', name: 'general', t: 'c', unread: 1, ls })], remove: [] });
+    // Already synced (stale, since TTL 0). The unread slice is already cached.
+    swrDb.upsertRoom({ rid: 'C1', name: 'general', fname: 'general', t: 'c', unread: 1, sub_updated_at: null });
+    swrDb.setRoomSyncState('C1', { lastSyncedAt: '2026-06-10T11:00:00.000Z' });
+    swrDb.upsertMessages([
+      { id: 'new1', rid: 'C1', author_id: 'u2', author_username: 'bob', author_name: 'Bob', text: 'unread', ts: '2026-06-10T13:00:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+    ]);
+
+    const report = await collectUnread(swrApp);
+
+    // Served the cached slice immediately, flagged refreshing (background delta kicked).
+    expect(report.refreshing).toBe(true);
+    expect(report.rooms[0]!.messages.map((m) => m.id)).toEqual(['new1']);
+    // Delta WAS kicked in the background (recorded), but the report did not wait
+    // on its result before returning.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(swrRc.calls).toContain('syncMessages');
+    swrDb.close();
+  });
+
+  it('SHALLOW: never-synced unread rooms hit getHistory once each, not the full backfill', async () => {
+    // Three never-synced unread rooms with last-read watermarks. The default
+    // RecordingRc.getHistory returns an empty (short) page, so the shallow sync
+    // settles in exactly one history call per room — the whole point of the
+    // cold-start optimization (vs. the multi-page full backfill).
+    const ls = '2026-06-10T12:00:00.000Z';
+    rc.onSubscriptions({
+      update: [
+        sub({ rid: 'C1', name: 'one', t: 'c', unread: 1, ls }),
+        sub({ rid: 'C2', name: 'two', t: 'c', unread: 1, ls }),
+        sub({ rid: 'C3', name: 'three', t: 'c', unread: 1, ls }),
+      ],
+      remove: [],
+    });
+    // NOTE: no seedRoom → rooms are never-synced (last_synced_at null), so the
+    // shallow path runs its single history window (not delta).
+
+    const report = await collectUnread(app);
+
+    // One history call per never-synced room: 3 total (not 3 × 5 = 15).
+    expect(rc.calls.filter((c) => c === 'getHistory')).toHaveLength(3);
+    // Never ran a delta on these (never-synced → history, not syncMessages).
+    expect(rc.calls).not.toContain('syncMessages');
+    expect(report.rooms.map((r) => r.room.id).sort()).toEqual(['C1', 'C2', 'C3']);
+
+    // All three are now shallowly known: watermark set, horizon = ls, partial.
+    for (const rid of ['C1', 'C2', 'C3']) {
+      const r = db.getRoom(rid)!;
+      expect(r.last_synced_at).toBeDefined();
+      expect(r.oldest_loaded_ts).toBe(ls);
+      expect(r.fully_backfilled).toBe(0);
+    }
+  });
+
   it('GUARD: never calls any read/markRead-style endpoint', async () => {
     const ls = '2026-06-10T12:00:00.000Z';
     rc.onSubscriptions({
