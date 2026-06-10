@@ -101,6 +101,25 @@ export class SyncEngine {
       opts?.force === true ||
       Date.now() - Date.parse(room.last_synced_at) > this.ttlMs;
     if (stale) {
+      // Stale-delta guard: chat.syncMessages on the lastUpdate path uses
+      // handleWithoutPagination — it returns EVERY update since the watermark
+      // in a single unbounded response (ignores count, no cursor). A room that
+      // has been stale for longer than the backfill window would force one
+      // giant Mongo query and payload (worse on admin/bot tokens, which bypass
+      // the rate limiter). A fresh bounded backfill from now is both lighter on
+      // the server and more useful than that unbounded delta, so treat such a
+      // room as first-touch and re-backfill instead.
+      const backfillCutoffMs =
+        Date.now() - this.backfillDays * 24 * 60 * 60 * 1000;
+      if (Date.parse(room.last_synced_at) < backfillCutoffMs) {
+        log.debug(
+          `Room ${room.rid} last synced ${room.last_synced_at} predates the ` +
+            `${this.backfillDays}-day backfill window; resetting to a bounded ` +
+            'backfill instead of an unbounded syncMessages delta.',
+        );
+        await this.backfill(room);
+        return;
+      }
       await this.delta(room);
     }
     // else: fresh — zero network.

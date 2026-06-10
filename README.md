@@ -355,6 +355,46 @@ Attachment links appear in `get_messages` output as `[file] name -> /file-upload
 
 **DB location**: `~/.local/share/rocket-cli/cache.db` (XDG data home). Override with `ROCKET_CLI_DB`.
 
+## Server load and rate limits
+
+### How rocket-cli stays gentle by construction
+
+rocket-cli is designed to minimize server pressure:
+
+| Mechanism | Detail |
+|---|---|
+| Concurrent requests | Global semaphore caps in-flight API calls at **2** at all times |
+| Cache-first reads | Repeat reads hit SQLite — zero network. Sync is TTL-gated (default 60 s) |
+| Bounded backfills | Initial room backfill is capped at **500 messages / 30 days**, fetched in pages of 100 |
+| Late-join rooms | Rooms unsynced longer than the backfill window are re-backfilled in the same bounded pages rather than requesting an unbounded delta from the server's last watermark |
+| `watch` polling | Queries the local FTS5 index only — never hits a server-side search endpoint |
+
+### Rocket.Chat's built-in rate limiter
+
+Rocket.Chat applies a per-endpoint, per-IP limit out of the box:
+
+| Setting | Default | Admin path |
+|---|---|---|
+| `API_Enable_Rate_Limiter_Limit_Calls_Default` | **10 calls / 60 s** | Admin → Settings → Rate Limiter |
+| `API_Enable_Rate_Limiter_Limit_Time_Default` | **60 000 ms** | same |
+
+Both values are tunable at runtime without a restart. When rocket-cli receives a **429**, it backs off using the server's own reset signal (`X-RateLimit-Reset` header or `details.seconds` in the error body). Rocket.Chat does not send a `Retry-After` header.
+
+### Important caveat for admin / bot tokens
+
+Accounts that hold the `api-bypass-rate-limit` permission are **not throttled by the server at all**. By default this permission is granted to the **admin**, **bot**, and **app** roles. If you run rocket-cli under an admin Personal Access Token (a common setup), the server-side limiter is effectively off — rocket-cli's own 2-concurrent-request cap is the only brake.
+
+This is fine in practice (see the table above), but worth knowing: the "10 calls/60 s" numbers below do not apply to your session if your token belongs to an admin or bot account.
+
+### Practical throughput numbers
+
+| Token type | First `sync --all` (200 rooms) | Subsequent runs |
+|---|---|---|
+| Non-admin (default limits, ≈1 room/6 s per endpoint bucket) | ~20 min | Near-instant — cache hit, 0 network |
+| Admin / bot (bypass-rate-limit) | Seconds | Near-instant |
+
+After the first sync the cache absorbs routine reads; typical interactive use generates a handful of delta calls per session regardless of token type.
+
 ## Environment variables
 
 | Variable | Required | Default | Description |

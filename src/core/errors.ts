@@ -47,7 +47,17 @@ const AUTH_HINT =
 interface RcErrorBody {
   error?: string;
   errorType?: string;
+  // Rocket.Chat's 429 body (ApiClass.ts:440-455) carries the reset timing here.
+  details?: {
+    timeToReset?: number; // ms until the window resets
+    seconds?: number; // same, in seconds
+  };
 }
+
+/** Upper bound on a derived backoff. RC's reset values are normally seconds,
+ *  but a misconfigured server (or a bogus epoch) could yield an absurd delta;
+ *  clamp so the caller never sleeps for minutes on a transient 429. */
+const MAX_BACKOFF_MS = 120_000;
 
 /** Parse Retry-After (seconds, per RFC 7231) into milliseconds. */
 function parseRetryAfter(res: Response): number | undefined {
@@ -61,6 +71,41 @@ function parseRetryAfter(res: Response): number | undefined {
     const delta = date - Date.now();
     return delta > 0 ? delta : 0;
   }
+  return undefined;
+}
+
+/**
+ * Derive the retry delay for a 429 from whatever signal the server offers.
+ * Rocket.Chat NEVER sends Retry-After; it sends X-RateLimit-Reset (epoch ms)
+ * plus a body { details: { timeToReset, seconds } } (ApiClass.ts:440-455). We
+ * still honor Retry-After first for any proxy that injects it. Priority:
+ *   1. Retry-After header (seconds or HTTP-date)
+ *   2. X-RateLimit-Reset header (epoch ms → delta from now)
+ *   3. body details.timeToReset (ms) or details.seconds
+ *   4. undefined → caller falls back to exponential backoff
+ * Header- and reset-derived values are clamped to [0, MAX_BACKOFF_MS].
+ */
+function parseRateLimitReset(res: Response, body: RcErrorBody): number | undefined {
+  const retryAfter = parseRetryAfter(res);
+  if (retryAfter !== undefined) return retryAfter;
+
+  const resetHeader = res.headers.get('x-ratelimit-reset');
+  if (resetHeader) {
+    const resetMs = Number(resetHeader);
+    if (Number.isFinite(resetMs)) {
+      const delta = resetMs - Date.now();
+      return Math.min(Math.max(delta, 0), MAX_BACKOFF_MS);
+    }
+  }
+
+  const { timeToReset, seconds } = body.details ?? {};
+  if (typeof timeToReset === 'number' && Number.isFinite(timeToReset)) {
+    return Math.min(Math.max(timeToReset, 0), MAX_BACKOFF_MS);
+  }
+  if (typeof seconds === 'number' && Number.isFinite(seconds)) {
+    return Math.min(Math.max(seconds * 1000, 0), MAX_BACKOFF_MS);
+  }
+
   return undefined;
 }
 
@@ -96,7 +141,7 @@ export async function mapRcError(e: unknown, ctx: string): Promise<Error> {
       return new RateLimitError(
         `Rate limited by Rocket.Chat (${ctx}). Wait ~60s and retry.`,
         status,
-        { errorType, serverError, retryAfterMs: parseRetryAfter(e) },
+        { errorType, serverError, retryAfterMs: parseRateLimitReset(e, body) },
       );
     }
     if (status === 403) {
