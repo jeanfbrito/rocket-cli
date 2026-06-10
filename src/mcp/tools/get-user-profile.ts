@@ -2,21 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { App } from '../../core/app.js';
 import { fail, ok } from './shared.js';
-
-interface RcUserInfo {
-  user: {
-    _id: string;
-    username: string;
-    name: string;
-    status: string;
-    statusText?: string;
-    bio?: string;
-    utcOffset?: number;
-    active: boolean;
-    roles?: string[];
-    emails?: Array<{ address: string; verified?: boolean }>;
-  };
-}
+import type { UserInfoResult } from '../../core/rc-client.js';
 
 /** Heuristic: looks like a user id (alphanumeric, 17 chars typical RC id). */
 function looksLikeId(value: string): boolean {
@@ -43,16 +29,12 @@ export function registerGetUserProfileTool(server: McpServer, app: App): void {
       try {
         const stripped = user.startsWith('@') ? user.slice(1) : user;
 
-        let info: RcUserInfo;
+        let info: UserInfoResult;
         try {
-          info = await app.rc.get<RcUserInfo>('/v1/users.info', {
-            username: stripped,
-          });
+          info = await app.rc.userInfo({ username: stripped });
         } catch (firstErr) {
           if (looksLikeId(stripped)) {
-            info = await app.rc.get<RcUserInfo>('/v1/users.info', {
-              userId: stripped,
-            });
+            info = await app.rc.userInfo({ userId: stripped });
           } else {
             throw firstErr;
           }

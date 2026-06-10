@@ -5,17 +5,12 @@
 import type { Db } from './db.js';
 import type { RoomRow } from './types.js';
 import type { RcClient } from './rc-client.js';
-import { subscriptionToRoomRow, type RcSubscription } from './normalize.js';
+import { subscriptionToRoomRow } from './normalize.js';
 
 /** Meta key holding the ISO timestamp of the last subscriptions refresh. */
 const ROOMS_REFRESHED_AT = 'rooms_refreshed_at';
 /** Subscriptions are considered fresh for 5 minutes. */
 const ROOMS_TTL_MS = 5 * 60 * 1000;
-
-interface SubscriptionsGetResponse {
-  update?: RcSubscription[];
-  remove?: unknown[];
-}
 
 export class RoomDirectory {
   constructor(
@@ -25,9 +20,7 @@ export class RoomDirectory {
 
   /** Pull the full subscription list and upsert every room. */
   async refresh(): Promise<void> {
-    const res = await this.rc.get<SubscriptionsGetResponse>(
-      '/v1/subscriptions.get',
-    );
+    const res = await this.rc.getSubscriptions();
     const subs = res.update ?? [];
     const rows = subs.map(subscriptionToRoomRow);
     if (rows.length > 0) this.db.upsertRooms(rows);

@@ -6,7 +6,7 @@ import {
   type SyncLike,
 } from '../src/core/search.js';
 import { RcApiError } from '../src/core/errors.js';
-import type { RcClient } from '../src/core/rc-client.js';
+import type { RcClient, SearchMessagesResult } from '../src/core/rc-client.js';
 import type { RcMessage } from '../src/core/normalize.js';
 
 // ---- fixtures --------------------------------------------------------------
@@ -58,18 +58,22 @@ function fakeSync(): SyncLike & { calls: string[] } {
   };
 }
 
-/** Fake RcClient: `get` returns a queued response or throws a queued error. */
-function fakeRc(impl?: (endpoint: string, params?: Record<string, unknown>) => unknown): {
+/**
+ * Fake RcClient: `searchMessages` returns a queued response or throws a queued
+ * error. Only `searchMessages` is exercised by SearchService.
+ */
+function fakeRc(impl?: (params: { roomId: string; searchText: string; count?: number }) => unknown): {
   rc: RcClient;
-  get: ReturnType<typeof vi.fn>;
+  searchMessages: ReturnType<typeof vi.fn>;
 } {
-  const get = vi.fn(async (endpoint: string, params?: Record<string, unknown>) => {
-    if (impl) return impl(endpoint, params);
-    return { messages: [] };
-  });
-  // Only `get` is exercised by SearchService.
-  const rc = { get } as unknown as RcClient;
-  return { rc, get };
+  const searchMessages = vi.fn(
+    async (params: { roomId: string; searchText: string; count?: number }) => {
+      if (impl) return impl(params) as SearchMessagesResult;
+      return { messages: [] } as unknown as SearchMessagesResult;
+    },
+  );
+  const rc = { searchMessages } as unknown as RcClient;
+  return { rc, searchMessages };
 }
 
 function serverMsg(id: string, msgText: string, over: Partial<RcMessage> = {}): RcMessage {
@@ -226,7 +230,7 @@ describe('SearchService.search', () => {
     // One local hit (< THIN_THRESHOLD of 5) triggers fallback.
     db.upsertMessages([msg('local1', { text: 'incident postmortem notes' })]);
 
-    const { rc, get } = fakeRc(() => ({
+    const { rc, searchMessages } = fakeRc(() => ({
       messages: [
         serverMsg('srv1', 'older incident report'),
         serverMsg('local1', 'incident postmortem notes'), // dup id → not re-added
@@ -235,9 +239,9 @@ describe('SearchService.search', () => {
     const svc = new SearchService(db, rc, fakeSync());
     const res = await svc.search('incident', { room: room('r1'), limit: 20 });
 
-    // chat.search called with the ORIGINAL (unsanitized) query.
-    expect(get).toHaveBeenCalledTimes(1);
-    expect(get).toHaveBeenCalledWith('/v1/chat.search', {
+    // searchMessages called with the ORIGINAL (unsanitized) query.
+    expect(searchMessages).toHaveBeenCalledTimes(1);
+    expect(searchMessages).toHaveBeenCalledWith({
       roomId: 'r1',
       searchText: 'incident',
       count: 20,
@@ -258,11 +262,11 @@ describe('SearchService.search', () => {
     seedRoom();
     db.upsertMessages([msg('only', { text: 'lonely match here' })]);
 
-    const { rc, get } = fakeRc();
+    const { rc, searchMessages } = fakeRc();
     const svc = new SearchService(db, rc, fakeSync());
     const res = await svc.search('lonely');
 
-    expect(get).not.toHaveBeenCalled();
+    expect(searchMessages).not.toHaveBeenCalled();
     expect(res.localOnly).toBe(true);
     expect(res.note).toMatch(/pass a room/i);
     expect(res.results.map((r) => r.id)).toEqual(['only']);
@@ -273,13 +277,13 @@ describe('SearchService.search', () => {
     seedRoom();
     db.upsertMessages([msg('local1', { text: 'flaky search term' })]);
 
-    const { rc, get } = fakeRc(() => {
+    const { rc, searchMessages } = fakeRc(() => {
       throw new RcApiError('boom', 500);
     });
     const svc = new SearchService(db, rc, fakeSync());
     const res = await svc.search('flaky', { room: room('r1') });
 
-    expect(get).toHaveBeenCalledTimes(1);
+    expect(searchMessages).toHaveBeenCalledTimes(1);
     expect(res.results.map((r) => r.id)).toEqual(['local1']);
     expect(res.localOnly).toBe(true);
     expect(res.note).toMatch(/server search unavailable/i);

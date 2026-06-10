@@ -4,7 +4,7 @@ import { RcClient } from './rc-client.js';
 import { RoomDirectory } from './rooms.js';
 import { SyncEngine } from './sync.js';
 import { SearchService } from './search.js';
-import { messageToRow, rowToCompact } from './normalize.js';
+import { messageToRow, rowToCompact, type RcWireMessage } from './normalize.js';
 import type { CompactMessage } from './types.js';
 
 export interface App {
@@ -29,23 +29,6 @@ export function createApp(config?: Config): App {
   return { config: cfg, db, rc, rooms, sync, search };
 }
 
-interface PostMessageResponse {
-  message?: {
-    _id?: string;
-    rid?: string;
-    msg?: string;
-    ts?: unknown;
-    u?: { _id?: string; username?: string; name?: string };
-    tmid?: string;
-    tcount?: number;
-    tlm?: unknown;
-    editedAt?: unknown;
-    t?: string;
-    attachments?: unknown[];
-    _updatedAt?: unknown;
-  };
-}
-
 export async function sendMessage(
   app: App,
   opts: { target: string; text: string; threadId?: string },
@@ -53,25 +36,25 @@ export async function sendMessage(
   const { target, text, threadId } = opts;
 
   let resolvedRid: string | undefined;
-  let body: Record<string, unknown>;
+  const body: { roomId?: string; channel?: string; text?: string; tmid?: string } = { text };
 
   if (target.startsWith('#') || target.startsWith('@')) {
-    body = { channel: target, text };
+    body.channel = target;
   } else {
     const roomRow = await app.rooms.resolve(target);
     resolvedRid = roomRow.rid;
-    body = { roomId: resolvedRid, text };
+    body.roomId = resolvedRid;
   }
 
   if (threadId !== undefined) {
-    body['tmid'] = threadId;
+    body.tmid = threadId;
   }
 
-  const res = await app.rc.post<PostMessageResponse>('/v1/chat.postMessage', body);
-  const raw = res.message ?? {};
+  const res = await app.rc.postMessage(body);
+  const raw: RcWireMessage = res.message ?? {};
 
-  const rid = (raw.rid as string | undefined) ?? resolvedRid ?? '';
-  const row = messageToRow(raw as Parameters<typeof messageToRow>[0], rid);
+  const rid = raw.rid ?? resolvedRid ?? '';
+  const row = messageToRow(raw, rid);
   app.db.upsertMessages([row]);
   return rowToCompact(row);
 }

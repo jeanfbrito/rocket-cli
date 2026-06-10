@@ -1,42 +1,65 @@
 // Pure transforms: Rocket.Chat REST JSON -> SQLite rows, and rows -> compact
-// LLM-facing records. No IO, no imports of core-typings (kept intentionally
-// loose: all RC fields optional, defensive against payload variance).
+// LLM-facing records. No IO.
+//
+// Inputs are typed from the official `@rocket.chat/core-typings` shapes, but
+// adapted to the *wire* reality of the REST API (see RcWire* types below).
+// The official types describe the canonical server-side records; what actually
+// arrives over REST is the `Serialized<T>` form (Date -> ISO string), and in
+// practice it deviates further: required fields are sometimes omitted, dates
+// occasionally arrive as the raw EJSON `{ $date: number }` (or epoch number)
+// instead of an ISO string, and `editedAt` lives on `IEditedMessage` rather
+// than the base `IMessage`. The implementation therefore keeps its defensive
+// guards; the types document intent without lying about the payload.
+import type {
+  IMessage,
+  ISubscription,
+  MessageAttachment,
+  Serialized,
+} from '@rocket.chat/core-typings';
 import type { CompactMessage, MessageRow, RoomRow } from './types.js';
 
 /** RC serializes dates as ISO strings over REST, but some payloads carry the
- *  raw EJSON `{ $date: number }` form. Accept both; everything else -> null. */
+ *  raw EJSON `{ $date: number }` form (we captured both live). Accept both;
+ *  everything else -> null. */
 type RcDate = string | number | { $date: number } | null | undefined;
 
-interface RcUser {
-  _id?: string;
-  username?: string;
-  name?: string;
-}
-
-interface RcAttachment {
-  title?: string;
-  text?: string;
-  description?: string;
-  image_url?: string;
-  title_link?: string;
-  message_link?: string; // present on quote/reply attachments
-}
-
-/** Minimal, loose shape of a Rocket.Chat message over REST. */
-export interface RcMessage {
-  _id?: string;
-  rid?: string;
-  msg?: string;
+/**
+ * Wire shape of a Rocket.Chat message as it arrives over REST.
+ *
+ * Starts from `Serialized<IMessage>` (the official message type with dates
+ * serialized to strings) but:
+ *  - makes everything optional + the whole thing tolerant of partial payloads,
+ *    since REST responses routinely omit fields the canonical type marks
+ *    required;
+ *  - re-widens the date fields to `RcDate` (REST mostly sends ISO strings, but
+ *    we have observed `{ $date }` / epoch-number variants in the wild);
+ *  - re-adds `editedAt` (a `Serialized<IEditedMessage>` field, absent from the
+ *    base message type) so we can read it without a cast.
+ */
+export type RcWireMessage = Omit<Partial<Serialized<IMessage>>, 'ts' | 'tlm' | '_updatedAt'> & {
   ts?: RcDate;
-  u?: RcUser;
-  tmid?: string;
-  tcount?: number;
   tlm?: RcDate;
-  editedAt?: RcDate;
-  t?: string; // system message type when present
-  attachments?: RcAttachment[];
   _updatedAt?: RcDate;
-}
+  // `editedAt` belongs to `Serialized<IEditedMessage>`, not the base message.
+  editedAt?: RcDate;
+};
+
+/** Back-compat alias for the prior local input type name. */
+export type RcMessage = RcWireMessage;
+
+/** Wire shape of a single message attachment (the `MessageAttachment` union,
+ *  serialized, made fully optional so we can probe variant-specific fields
+ *  like `image_url` / `message_link` without narrowing the union first). */
+export type RcWireAttachment = Partial<Serialized<MessageAttachment>>;
+
+/** Wire shape of a subscription record over REST. Same partial/loose treatment
+ *  as messages, with `_updatedAt` re-widened to `RcDate`. */
+export type RcWireSubscription = Omit<Partial<Serialized<ISubscription>>, '_updatedAt'> & {
+  _updatedAt?: RcDate;
+};
+
+/** Back-compat alias for the prior local input type name. */
+export type RcSubscription = RcWireSubscription;
 
 /** Convert any accepted RC date form to an ISO8601 string, or null. */
 export function toIso(d: RcDate): string | null {
@@ -54,34 +77,41 @@ export function toIso(d: RcDate): string | null {
   return null;
 }
 
-function attachmentLine(a: RcAttachment): string {
+function attachmentLine(a: RcWireAttachment): string {
   const title = a.title?.trim();
+  // `image_url` / `message_link` only exist on specific members of the
+  // MessageAttachment union, so read them off the loose wire shape.
+  const imageUrl = (a as { image_url?: string }).image_url;
+  const messageLink = (a as { message_link?: string }).message_link;
+  const titleLink = (a as { title_link?: string }).title_link;
   // Quote / reply attachments link back to another message.
-  if (a.message_link) {
+  if (messageLink) {
     const quote = (a.text ?? a.description ?? '').trim();
     return `[quote] ${quote.slice(0, 80)}`;
   }
-  if (a.image_url) {
-    return `[image] ${title ?? a.image_url}`;
+  if (imageUrl) {
+    return `[image] ${title ?? imageUrl}`;
   }
-  if (a.title_link || (title && !a.text)) {
-    return `[file] ${title ?? a.title_link ?? ''}`.trimEnd();
+  if (titleLink || (title && !a.text)) {
+    return `[file] ${title ?? titleLink ?? ''}`.trimEnd();
   }
   // Plain fallback: title/text.
   const fallback = title ?? a.text?.trim() ?? a.description?.trim();
   return fallback ?? '[attachment]';
 }
 
-function attachmentsJson(attachments: RcAttachment[] | undefined): string | null {
+function attachmentsJson(attachments: RcWireAttachment[] | undefined): string | null {
   if (!attachments || attachments.length === 0) return null;
   const lines = attachments.map(attachmentLine);
   return JSON.stringify(lines);
 }
 
 /** RC message JSON -> messages-table row. */
-export function messageToRow(raw: RcMessage, rid: string): MessageRow {
-  const u = raw.u ?? {};
-  const systemType = raw.t != null && raw.t !== '' ? raw.t : null;
+export function messageToRow(raw: RcWireMessage, rid: string): MessageRow {
+  const u = raw.u ?? ({} as NonNullable<RcWireMessage['u']>);
+  // `t` is a literal-union type, but a malformed payload could still send ''
+  // — keep the defensive empty-string guard via a widened comparison.
+  const systemType = raw.t != null && (raw.t as string) !== '' ? raw.t : null;
   return {
     id: raw._id ?? '',
     rid: raw.rid ?? rid,
@@ -95,7 +125,7 @@ export function messageToRow(raw: RcMessage, rid: string): MessageRow {
     tlm: toIso(raw.tlm),
     edited_at: toIso(raw.editedAt),
     system_type: systemType,
-    attachments_json: attachmentsJson(raw.attachments),
+    attachments_json: attachmentsJson(raw.attachments as RcWireAttachment[] | undefined),
     deleted: 0,
     updated_at: toIso(raw._updatedAt),
   };
@@ -127,18 +157,8 @@ export function rowToCompact(row: MessageRow): CompactMessage {
   return compact;
 }
 
-/** Loose shape of a Rocket.Chat subscription record. */
-export interface RcSubscription {
-  rid?: string;
-  name?: string;
-  fname?: string;
-  t?: string; // 'c' | 'p' | 'd'
-  unread?: number;
-  _updatedAt?: RcDate;
-}
-
 /** subscription -> rooms-table row (subset). */
-export function subscriptionToRoomRow(sub: RcSubscription): RoomRow {
+export function subscriptionToRoomRow(sub: RcWireSubscription): RoomRow {
   return {
     rid: sub.rid ?? '',
     name: sub.name ?? null,

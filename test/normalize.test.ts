@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  type RcMessage,
+  type RcWireAttachment,
+  type RcWireMessage,
+  type RcWireSubscription,
   messageToRow,
   rowToCompact,
   subscriptionToRoomRow,
@@ -10,7 +12,10 @@ import {
 const RID = 'GENERAL';
 const TS = '2026-06-10T14:02:11.000Z';
 
-function plain(overrides: Partial<RcMessage> = {}): RcMessage {
+// Fixtures are annotated with the official-types-derived wire shapes so that
+// any drift between our normalizer inputs and `@rocket.chat/core-typings`
+// surfaces at compile time.
+function plain(overrides: Partial<RcWireMessage> = {}): RcWireMessage {
   return {
     _id: 'm1',
     rid: RID,
@@ -19,7 +24,7 @@ function plain(overrides: Partial<RcMessage> = {}): RcMessage {
     u: { _id: 'u1', username: 'jean', name: 'Jean Brito' },
     _updatedAt: TS,
     ...overrides,
-  };
+  } satisfies RcWireMessage;
 }
 
 describe('toIso date guard', () => {
@@ -83,7 +88,12 @@ describe('messageToRow', () => {
 
   it('maps an attachment-only message (empty msg + file attachment)', () => {
     const row = messageToRow(
-      plain({ msg: '', attachments: [{ title: 'report.pdf', title_link: '/file/report.pdf' }] }),
+      plain({
+        msg: '',
+        attachments: [
+          { title: 'report.pdf', title_link: '/file/report.pdf' } satisfies RcWireAttachment,
+        ],
+      }),
       RID,
     );
     expect(row.text).toBe('');
@@ -98,7 +108,7 @@ describe('messageToRow', () => {
           { title: 'pic.png', image_url: '/img/pic.png' },
           { message_link: '/msg/x', text: 'a'.repeat(120) },
           { text: 'just some text' },
-        ],
+        ] satisfies RcWireAttachment[],
       }),
       RID,
     );
@@ -155,7 +165,13 @@ describe('rowToCompact', () => {
 
   it('surfaces system type and attachments', () => {
     const compact = rowToCompact(
-      messageToRow(plain({ t: 'uj', attachments: [{ title: 'f.txt', title_link: '/f' }] }), RID),
+      messageToRow(
+        plain({
+          t: 'uj',
+          attachments: [{ title: 'f.txt', title_link: '/f' } satisfies RcWireAttachment],
+        }),
+        RID,
+      ),
     );
     expect(compact.system).toBe('uj');
     expect(compact.attachments).toEqual(['[file] f.txt']);
@@ -171,7 +187,7 @@ describe('subscriptionToRoomRow', () => {
       t: 'c',
       unread: 5,
       _updatedAt: TS,
-    });
+    } satisfies RcWireSubscription);
     expect(row).toEqual({
       rid: RID,
       name: 'general',
@@ -183,7 +199,7 @@ describe('subscriptionToRoomRow', () => {
   });
 
   it('defaults unread to 0 and missing dates to null', () => {
-    const row = subscriptionToRoomRow({ rid: RID, t: 'd' });
+    const row = subscriptionToRoomRow({ rid: RID, t: 'd' } satisfies RcWireSubscription);
     expect(row.unread).toBe(0);
     expect(row.sub_updated_at).toBeNull();
     expect(row.name).toBeNull();

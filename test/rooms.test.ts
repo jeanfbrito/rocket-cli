@@ -2,42 +2,49 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { openDb, type Db } from '../src/core/db.js';
 import { RoomDirectory } from '../src/core/rooms.js';
 import type { RcSubscription } from '../src/core/normalize.js';
+import type {
+  RcClient,
+  SubscriptionsGetResult,
+} from '../src/core/rc-client.js';
 
-/** A fake RcClient that records GET calls and returns scripted responses. */
+/** The typed-method surface RoomDirectory consumes from RcClient. */
+type RoomMethods = Pick<RcClient, 'getSubscriptions'>;
+
+/** A fake RcClient that records getSubscriptions calls and returns scripted
+ *  responses (queued; the last is reused once the queue drains). */
 class FakeRc {
-  calls: Array<{ endpoint: string; params?: Record<string, unknown> }> = [];
-  // Endpoint -> queued responses (shift on each call; last reused if drained).
-  private responses = new Map<string, unknown[]>();
+  calls: Array<{ method: string; updatedSince?: string }> = [];
+  private queue: unknown[] = [];
 
-  on(endpoint: string, ...responses: unknown[]): this {
-    this.responses.set(endpoint, responses);
+  on(...responses: unknown[]): this {
+    this.queue = responses;
     return this;
   }
 
-  async get<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
-    this.calls.push({ endpoint, params });
-    const queue = this.responses.get(endpoint);
-    if (!queue || queue.length === 0) {
-      throw new Error(`FakeRc: no response queued for ${endpoint}`);
+  getSubscriptions(updatedSince?: string): Promise<SubscriptionsGetResult> {
+    this.calls.push({ method: 'getSubscriptions', updatedSince });
+    if (this.queue.length === 0) {
+      throw new Error('FakeRc: no response queued for getSubscriptions');
     }
-    const next = queue.length > 1 ? queue.shift() : queue[0];
-    return next as T;
+    const next = this.queue.length > 1 ? this.queue.shift() : this.queue[0];
+    return Promise.resolve(next as SubscriptionsGetResult);
   }
 
-  async post<T>(): Promise<T> {
-    throw new Error('FakeRc.post not implemented');
-  }
-
-  countOf(endpoint: string): number {
-    return this.calls.filter((c) => c.endpoint === endpoint).length;
+  countOf(method: string): number {
+    return this.calls.filter((c) => c.method === method).length;
   }
 }
+
+// Compile-time guard: the fake must structurally satisfy the method it stubs.
+const _typecheck: RoomMethods = new FakeRc();
+void _typecheck;
 
 function sub(over: Partial<RcSubscription>): RcSubscription {
   return { rid: 'r', name: 'name', fname: 'fname', t: 'c', unread: 0, ...over };
 }
 
-const SUBS = '/v1/subscriptions.get';
+/** Method name the directory invokes; used for call-count assertions. */
+const SUBS = 'getSubscriptions';
 
 describe('RoomDirectory.resolve', () => {
   let db: Db;
@@ -50,8 +57,8 @@ describe('RoomDirectory.resolve', () => {
     db = openDb(':memory:');
     const rc = new FakeRc();
     // First response, then any extra refresh responses in order.
-    rc.on(SUBS, { update: subs, remove: [] }, ...(extra ?? []).map((s) => ({ update: s, remove: [] })));
-    const dir = new RoomDirectory(db, rc as never);
+    rc.on({ update: subs, remove: [] }, ...(extra ?? []).map((s) => ({ update: s, remove: [] })));
+    const dir = new RoomDirectory(db, rc as unknown as RcClient);
     return { rc, dir };
   }
 
@@ -111,11 +118,10 @@ describe('RoomDirectory.resolve', () => {
     const rc = new FakeRc();
     // Initial refresh: empty. Second refresh (triggered by the miss): has it.
     rc.on(
-      SUBS,
       { update: [], remove: [] },
       { update: [sub({ rid: 'r1', name: 'newroom' })], remove: [] },
     );
-    const dir = new RoomDirectory(db, rc as never);
+    const dir = new RoomDirectory(db, rc as unknown as RcClient);
     await dir.refresh(); // consumes the empty first response
     const room = await dir.resolve('newroom');
     expect(room.rid).toBe('r1');
@@ -125,8 +131,8 @@ describe('RoomDirectory.resolve', () => {
   it('throws a helpful not-found error after a refresh still misses', async () => {
     db = openDb(':memory:');
     const rc = new FakeRc();
-    rc.on(SUBS, { update: [], remove: [] });
-    const dir = new RoomDirectory(db, rc as never);
+    rc.on({ update: [], remove: [] });
+    const dir = new RoomDirectory(db, rc as unknown as RcClient);
     await dir.refresh();
     await expect(dir.resolve('ghost')).rejects.toThrow(
       /not found — use list_rooms\/rooms command/,
@@ -141,8 +147,8 @@ describe('RoomDirectory.refresh / ensureFresh / list', () => {
   it('records rooms_refreshed_at and upserts rooms', async () => {
     db = openDb(':memory:');
     const rc = new FakeRc();
-    rc.on(SUBS, { update: [sub({ rid: 'r1', name: 'general' })], remove: [] });
-    const dir = new RoomDirectory(db, rc as never);
+    rc.on({ update: [sub({ rid: 'r1', name: 'general' })], remove: [] });
+    const dir = new RoomDirectory(db, rc as unknown as RcClient);
     await dir.refresh();
     expect(db.getMeta('rooms_refreshed_at')).toBeDefined();
     expect(db.getRoom('r1')?.name).toBe('general');
@@ -151,8 +157,8 @@ describe('RoomDirectory.refresh / ensureFresh / list', () => {
   it('ensureFresh skips the network when within TTL', async () => {
     db = openDb(':memory:');
     const rc = new FakeRc();
-    rc.on(SUBS, { update: [sub({ rid: 'r1' })], remove: [] });
-    const dir = new RoomDirectory(db, rc as never);
+    rc.on({ update: [sub({ rid: 'r1' })], remove: [] });
+    const dir = new RoomDirectory(db, rc as unknown as RcClient);
     await dir.refresh();
     await dir.ensureFresh();
     await dir.list();
@@ -162,14 +168,14 @@ describe('RoomDirectory.refresh / ensureFresh / list', () => {
   it('list returns filtered rooms', async () => {
     db = openDb(':memory:');
     const rc = new FakeRc();
-    rc.on(SUBS, {
+    rc.on({
       update: [
         sub({ rid: 'c1', name: 'general', t: 'c' }),
         sub({ rid: 'p1', name: 'secret', t: 'p' }),
       ],
       remove: [],
     });
-    const dir = new RoomDirectory(db, rc as never);
+    const dir = new RoomDirectory(db, rc as unknown as RcClient);
     await dir.refresh();
     const groups = await dir.list({ type: 'p' });
     expect(groups.map((r) => r.rid)).toEqual(['p1']);

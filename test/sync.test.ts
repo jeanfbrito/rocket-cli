@@ -3,46 +3,89 @@ import { openDb, type Db } from '../src/core/db.js';
 import { SyncEngine } from '../src/core/sync.js';
 import { RcApiError } from '../src/core/errors.js';
 import type { RcMessage } from '../src/core/normalize.js';
+import type {
+  RcClient,
+  HistoryResult,
+  SyncMessagesResult,
+  ThreadMessagesResult,
+  GetMessageResult,
+} from '../src/core/rc-client.js';
 import type { RoomRow } from '../src/core/types.js';
 
+/** Typed-method surface the SyncEngine consumes from RcClient. */
+type SyncMethods = Pick<
+  RcClient,
+  'getHistory' | 'syncMessages' | 'getThreadMessages' | 'getMessage'
+>;
+
 /**
- * Fake RcClient: each endpoint maps to a handler that receives the call params
- * and returns a response. Records every call for assertions.
+ * Fake RcClient: each typed method maps to a handler that receives the call
+ * params and returns a response. Records every call (keyed by method name) for
+ * assertions. `historyRoomType` is folded into the recorded params so the
+ * existing history scenarios still assert on `latest` / `oldest`.
  */
 type Handler = (params: Record<string, unknown>, n: number) => unknown;
 
 class FakeRc {
-  calls: Array<{ endpoint: string; params: Record<string, unknown> }> = [];
+  calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   private handlers = new Map<string, Handler>();
-  private perEndpointCount = new Map<string, number>();
+  private perMethodCount = new Map<string, number>();
 
-  on(endpoint: string, handler: Handler): this {
-    this.handlers.set(endpoint, handler);
+  on(method: string, handler: Handler): this {
+    this.handlers.set(method, handler);
     return this;
   }
 
-  async get<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
-    const p = params ?? {};
-    this.calls.push({ endpoint, params: p });
-    const handler = this.handlers.get(endpoint);
-    if (!handler) throw new Error(`FakeRc: no handler for ${endpoint}`);
-    const n = this.perEndpointCount.get(endpoint) ?? 0;
-    this.perEndpointCount.set(endpoint, n + 1);
-    return handler(p, n) as T;
+  private dispatch(method: string, params: Record<string, unknown>): unknown {
+    this.calls.push({ method, params });
+    const handler = this.handlers.get(method);
+    if (!handler) throw new Error(`FakeRc: no handler for ${method}`);
+    const n = this.perMethodCount.get(method) ?? 0;
+    this.perMethodCount.set(method, n + 1);
+    return handler(params, n);
   }
 
-  async post<T>(): Promise<T> {
-    throw new Error('FakeRc.post not implemented');
+  getHistory(
+    roomType: 'c' | 'p' | 'd',
+    params: Record<string, unknown>,
+  ): Promise<HistoryResult> {
+    return Promise.resolve(
+      this.dispatch('getHistory', { roomType, ...params }) as HistoryResult,
+    );
   }
 
-  countOf(endpoint: string): number {
-    return this.calls.filter((c) => c.endpoint === endpoint).length;
+  syncMessages(params: Record<string, unknown>): Promise<SyncMessagesResult> {
+    return Promise.resolve(
+      this.dispatch('syncMessages', params) as SyncMessagesResult,
+    );
+  }
+
+  getThreadMessages(
+    params: Record<string, unknown>,
+  ): Promise<ThreadMessagesResult> {
+    return Promise.resolve(
+      this.dispatch('getThreadMessages', params) as ThreadMessagesResult,
+    );
+  }
+
+  getMessage(params: Record<string, unknown>): Promise<GetMessageResult> {
+    return Promise.resolve(
+      this.dispatch('getMessage', params) as GetMessageResult,
+    );
+  }
+
+  countOf(method: string): number {
+    return this.calls.filter((c) => c.method === method).length;
   }
 
   total(): number {
     return this.calls.length;
   }
 }
+
+// Compile-time guard: the fake must structurally satisfy the methods it stubs.
+const _typecheck: SyncMethods = new FakeRc();
+void _typecheck;
 
 /** A directory stub: refresh() inserts a room so missing-room paths work. */
 function fakeRooms(db: Db, room?: RoomRow): { refresh(): Promise<void> } {
@@ -80,9 +123,9 @@ function rcMsg(id: string, tsMs: number, over: Partial<RcMessage> = {}): RcMessa
   };
 }
 
-const HIST = '/v1/channels.history';
-const SYNC = '/v1/chat.syncMessages';
-const THREAD = '/v1/chat.getThreadMessages';
+const HIST = 'getHistory';
+const SYNC = 'syncMessages';
+const THREAD = 'getThreadMessages';
 
 function makeEngine(
   db: Db,
@@ -90,7 +133,7 @@ function makeEngine(
   rooms: { refresh(): Promise<void> },
   opts?: Partial<{ ttlSeconds: number; backfillLimit: number; backfillDays: number }>,
 ): SyncEngine {
-  return new SyncEngine(db, rc as never, rooms, {
+  return new SyncEngine(db, rc as unknown as RcClient, rooms, {
     ttlSeconds: opts?.ttlSeconds ?? 60,
     backfillLimit: opts?.backfillLimit ?? 500,
     backfillDays: opts?.backfillDays ?? 30,

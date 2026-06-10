@@ -6,7 +6,7 @@ import type { Db } from './db.js';
 import type { RcClient } from './rc-client.js';
 import { RcApiError } from './errors.js';
 import { log } from './log.js';
-import { messageToRow, rowToCompact, type RcMessage } from './normalize.js';
+import { messageToRow, rowToCompact, type RcWireMessage } from './normalize.js';
 import type { CompactMessage, MessageRow, RoomRow } from './types.js';
 
 /**
@@ -165,11 +165,12 @@ export class SearchService {
     localHits: SearchHit[],
   ): Promise<SearchResult> {
     try {
-      const resp = await this.rc.get<{ messages?: RcMessage[] }>(
-        '/v1/chat.search',
-        { roomId: room.rid, searchText: query, count: limit },
-      );
-      const serverMsgs = resp.messages ?? [];
+      const resp = await this.rc.searchMessages({
+        roomId: room.rid,
+        searchText: query,
+        count: limit,
+      });
+      const serverMsgs: RcWireMessage[] = resp.messages ?? [];
 
       if (serverMsgs.length > 0) {
         const rows = serverMsgs.map((m) => messageToRow(m, room.rid));

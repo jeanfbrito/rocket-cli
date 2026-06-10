@@ -6,38 +6,68 @@ import { SyncEngine } from '../src/core/sync.js';
 import { SearchService } from '../src/core/search.js';
 import type { RcSubscription } from '../src/core/normalize.js';
 
-/** Minimal fake RcClient. */
+/**
+ * Fake RcClient implementing the full typed endpoint surface. Each method
+ * returns a sensible empty default unless a response is queued via the matching
+ * `onX` setter. `postMessage` calls are recorded in `posts` for assertions.
+ */
 class FakeRc {
-  posts: Array<{ endpoint: string; body: Record<string, unknown> }> = [];
-  gets: Array<{ endpoint: string; params?: Record<string, unknown> }> = [];
+  posts: Array<{ body: Record<string, unknown> }> = [];
 
-  private getResponses = new Map<string, unknown[]>();
-  private postResponses = new Map<string, unknown[]>();
+  private subscriptions: unknown = { update: [], remove: [] };
+  private postMessageResponses: unknown[] = [];
 
-  onGet(endpoint: string, ...responses: unknown[]): this {
-    this.getResponses.set(endpoint, responses);
+  onSubscriptions(response: unknown): this {
+    this.subscriptions = response;
     return this;
   }
 
-  onPost(endpoint: string, ...responses: unknown[]): this {
-    this.postResponses.set(endpoint, responses);
+  onPostMessage(...responses: unknown[]): this {
+    this.postMessageResponses = responses;
     return this;
   }
 
-  async get<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
-    this.gets.push({ endpoint, params });
-    const queue = this.getResponses.get(endpoint);
-    if (!queue || queue.length === 0) throw new Error(`FakeRc: no GET queued for ${endpoint}`);
-    const next = queue.length > 1 ? queue.shift() : queue[0];
-    return next as T;
+  async getSubscriptions(): Promise<any> {
+    return this.subscriptions;
   }
 
-  async post<T>(endpoint: string, body?: Record<string, unknown>): Promise<T> {
-    this.posts.push({ endpoint, body: body ?? {} });
-    const queue = this.postResponses.get(endpoint);
-    if (!queue || queue.length === 0) throw new Error(`FakeRc: no POST queued for ${endpoint}`);
-    const next = queue.length > 1 ? queue.shift() : queue[0];
-    return next as T;
+  async postMessage(body: Record<string, unknown>): Promise<any> {
+    this.posts.push({ body });
+    if (this.postMessageResponses.length === 0) {
+      throw new Error('FakeRc: no postMessage response queued');
+    }
+    const next =
+      this.postMessageResponses.length > 1
+        ? this.postMessageResponses.shift()
+        : this.postMessageResponses[0];
+    return next;
+  }
+
+  // Remaining typed methods — empty defaults so SyncEngine/RoomDirectory paths
+  // never blow up regardless of which scenario is under test.
+  async getHistory(): Promise<any> {
+    return { messages: [] };
+  }
+  async syncMessages(): Promise<any> {
+    return { result: { updated: [], deleted: [] } };
+  }
+  async getThreadMessages(): Promise<any> {
+    return { messages: [], total: 0 };
+  }
+  async getThreadsList(): Promise<any> {
+    return { threads: [], total: 0 };
+  }
+  async searchMessages(): Promise<any> {
+    return { messages: [] };
+  }
+  async react(): Promise<any> {
+    return { success: true };
+  }
+  async userInfo(): Promise<any> {
+    return { user: {} };
+  }
+  async getMessage(): Promise<any> {
+    return { message: {} };
   }
 }
 
@@ -67,7 +97,7 @@ describe('sendMessage', () => {
   it('passes channel param untouched for #chan target', async () => {
     db = openDb(':memory:');
     const rc = new FakeRc();
-    rc.onPost('/v1/chat.postMessage', {
+    rc.onPostMessage({
       message: { _id: 'm1', rid: 'GENERAL', msg: 'hello', ts: '2026-06-10T00:00:00.000Z', u: { _id: 'u1', username: 'alice' } },
     });
     const app = makeApp(db, rc);
@@ -84,11 +114,11 @@ describe('sendMessage', () => {
   it('resolves room name to roomId for bare room name target', async () => {
     db = openDb(':memory:');
     const rc = new FakeRc();
-    rc.onGet('/v1/subscriptions.get', {
+    rc.onSubscriptions({
       update: [sub({ rid: 'GENERAL', name: 'general' })],
       remove: [],
     });
-    rc.onPost('/v1/chat.postMessage', {
+    rc.onPostMessage({
       message: { _id: 'm2', rid: 'GENERAL', msg: 'hi', ts: '2026-06-10T00:00:00.000Z', u: { _id: 'u1', username: 'bob' } },
     });
     const app = makeApp(db, rc);
@@ -104,7 +134,7 @@ describe('sendMessage', () => {
   it('maps threadId to tmid in the POST body', async () => {
     db = openDb(':memory:');
     const rc = new FakeRc();
-    rc.onPost('/v1/chat.postMessage', {
+    rc.onPostMessage({
       message: { _id: 'm3', rid: 'R1', msg: 'reply', ts: '2026-06-10T00:00:00.000Z', u: { _id: 'u1', username: 'alice' } },
     });
     const app = makeApp(db, rc);
@@ -118,7 +148,7 @@ describe('sendMessage', () => {
   it('upserts the response message into db so it is readable after', async () => {
     db = openDb(':memory:');
     const rc = new FakeRc();
-    rc.onPost('/v1/chat.postMessage', {
+    rc.onPostMessage({
       message: { _id: 'msg-xyz', rid: 'ROOM1', msg: 'stored', ts: '2026-06-10T12:00:00.000Z', u: { _id: 'u1', username: 'charlie' } },
     });
     const app = makeApp(db, rc);

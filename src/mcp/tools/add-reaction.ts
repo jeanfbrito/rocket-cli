@@ -34,7 +34,7 @@ export function registerAddReactionTool(server: McpServer, app: App): void {
     async ({ messageId, emoji, remove }) => {
       try {
         const normalizedEmoji = normalizeEmoji(emoji);
-        await app.rc.post('/v1/chat.react', {
+        await app.rc.react({
           messageId,
           emoji: normalizedEmoji,
           shouldReact: !remove,

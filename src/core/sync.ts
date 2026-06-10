@@ -9,7 +9,7 @@
 import type { Db } from './db.js';
 import type { MessageRow, RoomRow } from './types.js';
 import type { RcClient } from './rc-client.js';
-import { messageToRow, type RcMessage } from './normalize.js';
+import { messageToRow } from './normalize.js';
 import { RcApiError } from './errors.js';
 import { log } from './log.js';
 
@@ -25,44 +25,11 @@ const PAGE_SIZE = 100;
  *  returning a non-null cursor forever. */
 const MAX_DELTA_PAGES = 50;
 
-interface HistoryResponse {
-  messages?: RcMessage[];
-}
-
-interface SyncMessagesResponse {
-  result?: {
-    updated?: RcMessage[];
-    deleted?: Array<{ _id?: string }>;
-    cursor?: { next?: string | null; previous?: string | null };
-  };
-}
-
-interface GetMessageResponse {
-  message?: RcMessage;
-}
-
-interface ThreadMessagesResponse {
-  messages?: RcMessage[];
-  total?: number;
-}
-
-interface ThreadsListResponse {
-  threads?: RcMessage[];
-}
-
-/** Map a room type to its history endpoint. */
-function historyEndpoint(t: string): string {
-  switch (t) {
-    case 'c':
-      return '/v1/channels.history';
-    case 'p':
-      return '/v1/groups.history';
-    case 'd':
-      return '/v1/im.history';
-    default:
-      // Default to channels.history; the server will reject if truly invalid.
-      return '/v1/channels.history';
-  }
+/** Narrow a room type to the three values getHistory accepts; anything else
+ *  (e.g. a malformed payload) defaults to channels.history, matching the prior
+ *  historyEndpoint() fallback. */
+function historyRoomType(t: string): 'c' | 'p' | 'd' {
+  return t === 'p' || t === 'd' ? t : 'c';
 }
 
 export class SyncEngine {
@@ -146,7 +113,7 @@ export class SyncEngine {
     // re-fetched on the next delta. Upserts are idempotent, so duplicates are
     // harmless.
     const syncStart = new Date().toISOString();
-    const endpoint = historyEndpoint(room.t);
+    const roomType = historyRoomType(room.t);
     const cutoffMs = Date.now() - this.backfillDays * 24 * 60 * 60 * 1000;
 
     let latest: string | undefined; // first call: now (omit param)
@@ -155,14 +122,12 @@ export class SyncEngine {
     let fullyBackfilled = false;
 
     for (;;) {
-      const params: Record<string, unknown> = {
+      const res = await this.rc.getHistory(roomType, {
         roomId: room.rid,
         count: PAGE_SIZE,
         showThreadMessages: true,
-      };
-      if (latest !== undefined) params['latest'] = latest;
-
-      const res = await this.rc.get<HistoryResponse>(endpoint, params);
+        ...(latest !== undefined && { latest }),
+      });
       const messages = res.messages ?? [];
       if (messages.length > 0) {
         const rows = messages.map((m) => messageToRow(m, room.rid));
@@ -219,18 +184,13 @@ export class SyncEngine {
     try {
       let cursor: string | null = null;
       for (let page = 0; page < MAX_DELTA_PAGES; page++) {
-        const params: Record<string, unknown> = {
+        const res = await this.rc.syncMessages({
           roomId: room.rid,
           lastUpdate,
           count: PAGE_SIZE,
-        };
-        if (cursor) params['next'] = cursor;
-
-        const res = await this.rc.get<SyncMessagesResponse>(
-          '/v1/chat.syncMessages',
-          params,
-        );
-        const result = res.result ?? {};
+          ...(cursor ? { next: cursor } : {}),
+        });
+        const result = res.result;
         const updated = result.updated ?? [];
         const deleted = result.deleted ?? [];
 
@@ -278,18 +238,16 @@ export class SyncEngine {
   /** Fallback delta: page history forward from the last watermark. No deletion
    *  detection — history endpoints never report removals. */
   private async historyCatchUp(room: RoomRow, oldest: string): Promise<void> {
-    const endpoint = historyEndpoint(room.t);
+    const roomType = historyRoomType(room.t);
     let latest: string | undefined;
     for (let page = 0; page < MAX_DELTA_PAGES; page++) {
-      const params: Record<string, unknown> = {
+      const res = await this.rc.getHistory(roomType, {
         roomId: room.rid,
         oldest,
         count: PAGE_SIZE,
         showThreadMessages: true,
-      };
-      if (latest !== undefined) params['latest'] = latest;
-
-      const res = await this.rc.get<HistoryResponse>(endpoint, params);
+        ...(latest !== undefined && { latest }),
+      });
       const messages = res.messages ?? [];
       if (messages.length > 0) {
         this.db.upsertMessages(messages.map((m) => messageToRow(m, room.rid)));
@@ -319,9 +277,7 @@ export class SyncEngine {
     let parent = this.db.getMessage(tmid);
     if (!parent) {
       // Parent unknown locally — fetch it directly so we can learn its room.
-      const res = await this.rc.get<GetMessageResponse>('/v1/chat.getMessage', {
-        msgId: tmid,
-      });
+      const res = await this.rc.getMessage({ msgId: tmid });
       if (!res.message || !res.message._id) {
         throw new Error(`Thread parent "${tmid}" not found.`);
       }
@@ -344,10 +300,11 @@ export class SyncEngine {
       let offset = 0;
       let total = Number.POSITIVE_INFINITY;
       for (let page = 0; page < MAX_DELTA_PAGES; page++) {
-        const res = await this.rc.get<ThreadMessagesResponse>(
-          '/v1/chat.getThreadMessages',
-          { tmid, count: PAGE_SIZE, offset },
-        );
+        const res = await this.rc.getThreadMessages({
+          tmid,
+          count: PAGE_SIZE,
+          offset,
+        });
         const messages = res.messages ?? [];
         if (typeof res.total === 'number') total = res.total;
         if (messages.length > 0) {
@@ -387,16 +344,15 @@ export class SyncEngine {
     // Already covered: the requested point is no older than what we have.
     if (oldest != null && beforeTs >= oldest) return;
 
-    const endpoint = historyEndpoint(room.t);
+    const roomType = historyRoomType(room.t);
     const targetMs = Date.parse(beforeTs);
-    let latest: string | undefined =
-      oldest != null ? oldest : new Date().toISOString();
+    let latest: string = oldest != null ? oldest : new Date().toISOString();
     let added = 0;
     let oldestSeen: string | null = oldest ?? null;
     let fullyBackfilled = false;
 
     for (;;) {
-      const res = await this.rc.get<HistoryResponse>(endpoint, {
+      const res = await this.rc.getHistory(roomType, {
         roomId: rid,
         count: PAGE_SIZE,
         latest,
@@ -458,10 +414,7 @@ export class SyncEngine {
    *  list_threads tool so it has something to show before a full backfill. */
   async seedThreadParents(rid: string): Promise<void> {
     if (this.db.getThreadParents(rid, { limit: 1 }).length > 0) return;
-    const res = await this.rc.get<ThreadsListResponse>(
-      '/v1/chat.getThreadsList',
-      { rid, count: 50 },
-    );
+    const res = await this.rc.getThreadsList({ rid, count: 50 });
     const threads = res.threads ?? [];
     if (threads.length > 0) {
       this.db.upsertMessages(threads.map((m) => messageToRow(m, rid)));
