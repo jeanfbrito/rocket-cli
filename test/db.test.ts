@@ -67,7 +67,7 @@ function ftsRowids(db: Db, query: string): number[] {
 describe('migrations', () => {
   it('migrates a :memory: db cleanly and sets schema_version', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('7');
+    expect(db.getMeta('schema_version')).toBe('8');
     const tables = (
       db.conn
         .prepare(
@@ -90,7 +90,7 @@ describe('migrations', () => {
 
   it('v4 adds ls + tunread columns to rooms', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('7');
+    expect(db.getMeta('schema_version')).toBe('8');
     const cols = (
       db.conn.prepare('PRAGMA table_info(rooms)').all() as { name: string }[]
     ).map((c) => c.name);
@@ -100,7 +100,7 @@ describe('migrations', () => {
 
   it('v6 adds an alert column to rooms, defaulting to 0', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('7');
+    expect(db.getMeta('schema_version')).toBe('8');
     const cols = (
       db.conn.prepare('PRAGMA table_info(rooms)').all() as { name: string }[]
     ).map((c) => c.name);
@@ -113,7 +113,7 @@ describe('migrations', () => {
 
   it('v7 adds the hide-unread / mention bookkeeping columns to rooms, with defaults', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('7');
+    expect(db.getMeta('schema_version')).toBe('8');
     const cols = (
       db.conn.prepare('PRAGMA table_info(rooms)').all() as { name: string }[]
     ).map((c) => c.name);
@@ -156,7 +156,7 @@ describe('migrations', () => {
       raw.close();
 
       const db = openDb(path);
-      expect(db.getMeta('schema_version')).toBe('7');
+      expect(db.getMeta('schema_version')).toBe('8');
       const r = db.getRoom('legacy');
       expect(r?.unread).toBe(4);
       expect(r?.alert).toBe(1);
@@ -173,7 +173,7 @@ describe('migrations', () => {
 
   it('v5 adds a mentions column + partial index, defaulting to []', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('7');
+    expect(db.getMeta('schema_version')).toBe('8');
 
     const cols = (
       db.conn.prepare('PRAGMA table_info(messages)').all() as { name: string }[]
@@ -222,7 +222,7 @@ describe('migrations', () => {
 
       const db2 = openDb(path);
       // Still at the latest version, prior data preserved → no destructive re-run.
-      expect(db2.getMeta('schema_version')).toBe('7');
+      expect(db2.getMeta('schema_version')).toBe('8');
       expect(db2.getMeta('instance_url')).toBe('https://example.com');
       db2.close();
     } finally {
@@ -472,6 +472,27 @@ describe('repository', () => {
     // Another edit drops me again.
     db.upsertMessages([msg('m1', { mentions: '["carol"]' })]);
     expect(db.findMentions(['jean'])).toEqual([]);
+  });
+
+  it('findMentions EXPLAIN QUERY PLAN uses idx_messages_mentions (no temp B-tree)', () => {
+    // Assert that the v8 index shape (ts DESC WHERE mentions != '[]') is
+    // actually picked up by the planner. A SCAN messages or a temp B-tree
+    // means the index is being skipped.
+    db = openDb(':memory:');
+    const plan = db.conn
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM messages
+         WHERE deleted = 0
+           AND mentions != '[]'
+           AND EXISTS (SELECT 1 FROM json_each(messages.mentions) WHERE json_each.value IN ('alice'))
+         ORDER BY ts DESC
+         LIMIT 10`,
+      )
+      .all() as { detail: string }[];
+    const details = plan.map((row) => row.detail);
+    expect(details.some((d) => d.includes('idx_messages_mentions'))).toBe(true);
+    expect(details.some((d) => d === 'SCAN messages')).toBe(false);
   });
 
   it('thread_sync get/set round-trips', () => {

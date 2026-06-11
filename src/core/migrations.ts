@@ -296,6 +296,35 @@ export const MIGRATIONS: Migration[] = [
       `ALTER TABLE rooms ADD COLUMN tunread_user TEXT NOT NULL DEFAULT '[]';`,
     ],
   },
+  {
+    // v8 — fix the idx_messages_mentions index shape so it actually backs
+    // findMentions.
+    //
+    // WHY the v5 index was never used: the v5 index was defined as
+    // (rid, ts DESC) WHERE mentions != '[]'. findMentions scans across ALL rooms
+    // ordered by ts DESC globally (no rid equality predicate), so an index
+    // leading on rid cannot back the ORDER BY — SQLite would still need a temp
+    // B-tree. Worse, findMentions uses an EXISTS (SELECT 1 FROM json_each(...))
+    // predicate, and SQLite's partial-index planner requires the query to state
+    // the partial-index predicate literally in its WHERE clause; json_each over
+    // '[]' yields no rows, which is semantically equivalent to mentions != '[]',
+    // but the planner cannot prove it. Both problems were verified via EXPLAIN
+    // QUERY PLAN: the output was SCAN messages + USE TEMP B-TREE FOR ORDER BY,
+    // meaning the index was skipped entirely on every call.
+    //
+    // Fix: drop the old index and create a new one keyed on (ts DESC) only,
+    // keeping the same partial predicate (mentions != '[]'). With this shape the
+    // index is ordered the same way findMentions needs (newest first, across all
+    // rooms), and findMentions now also states `mentions != '[]'` literally in
+    // its WHERE clause so the planner can match the partial-index predicate.
+    // EXPLAIN QUERY PLAN then shows SEARCH messages USING INDEX
+    // idx_messages_mentions with no temp B-tree.
+    version: 8,
+    statements: [
+      `DROP INDEX IF EXISTS idx_messages_mentions;`,
+      `CREATE INDEX idx_messages_mentions ON messages (ts DESC) WHERE mentions != '[]';`,
+    ],
+  },
 ];
 
 /** Highest schema version defined by the migration set. */

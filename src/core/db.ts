@@ -474,8 +474,9 @@ export class Db {
    * it directly rather than a fragile LIKE '%"name"%' scan that would also
    * false-positive on substrings. Excludes soft-deleted rows and (when
    * `sinceTs` is set) anything older than the watermark. The partial
-   * idx_messages_mentions index (rid, ts DESC WHERE mentions != '[]') backs the
-   * ORDER BY.
+   * idx_messages_mentions index (ts DESC WHERE mentions != '[]') backs the
+   * global newest-first scan; the query states `mentions != '[]'` literally
+   * so the planner can match the partial-index predicate.
    */
   findMentions(
     usernames: string[],
@@ -490,6 +491,7 @@ export class Db {
 
     const clauses = [
       'deleted = 0',
+      "mentions != '[]'",
       `EXISTS (SELECT 1 FROM json_each(messages.mentions) WHERE json_each.value IN (${placeholders}))`,
     ];
     if (opts.sinceTs !== undefined) {
