@@ -107,10 +107,13 @@ function makeApp(
       dbPath: ':memory:',
       ttlSeconds: 60,
       backfillLimit: 100,
+      emojiImages: false,
+      readOnly: false,
     },
     db,
     rc: rc as never,
     rooms: rooms as never,
+    emojis: {} as never,
     sync: sync as never,
     search: {} as never,
   };

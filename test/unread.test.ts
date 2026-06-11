@@ -107,6 +107,7 @@ function makeApp(db: Db, rc: RecordingRc): App {
     ttlSeconds: 3600,
     backfillLimit: 100,
     emojiImages: true,
+    readOnly: false,
   };
   return { config, db, rc: rc as never, rooms, emojis, sync, search };
 }
@@ -300,7 +301,6 @@ describe('collectUnread', () => {
           alert: true,
           ls,
           hideUnreadStatus: true,
-          hideMentionStatus: false,
           userMentions: 1,
         }),
       ],

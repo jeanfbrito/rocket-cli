@@ -278,6 +278,7 @@ function makeApp(db: Db, rc: FakeRc): App {
     ttlSeconds: 60,
     backfillLimit: 100,
     emojiImages: true,
+    readOnly: false,
   };
   return { config, db, rc: rc as never, rooms, emojis, sync, search };
 }

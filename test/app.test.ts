@@ -86,8 +86,10 @@ function makeApp(db: Db, rc: FakeRc): App {
     dbPath: ':memory:',
     ttlSeconds: 60,
     backfillLimit: 100,
+    emojiImages: false,
+    readOnly: false,
   };
-  return { config, db, rc: rc as never, rooms, sync, search };
+  return { config, db, rc: rc as never, rooms, emojis: {} as never, sync, search };
 }
 
 describe('sendMessage', () => {
