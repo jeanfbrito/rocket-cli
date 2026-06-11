@@ -42,6 +42,13 @@ export type RcWireMessage = Omit<Partial<Serialized<IMessage>>, 'ts' | 'tlm' | '
   _updatedAt?: RcDate;
   // `editedAt` belongs to `Serialized<IEditedMessage>`, not the base message.
   editedAt?: RcDate;
+  // `_hidden` is a base `IMessage` flag, but the canonical type omits `parent`.
+  // When `Message_KeepHistory` is enabled, editing a message makes the server
+  // clone the PRE-EDIT document into a NEW `_id` carrying `_hidden: true` and
+  // `parent: <original id>` (see RC `Messages.cloneAndSaveAsHistoryByRecord`).
+  // Modern RC filters these out of REST responses, but older / differently
+  // configured deployments leak them — re-declare `parent` so we can read it.
+  parent?: string;
 };
 
 /** Back-compat alias for the prior local input type name. */
@@ -152,6 +159,14 @@ export function messageToRow(raw: RcWireMessage, rid: string): MessageRow {
   // `t` is a literal-union type, but a malformed payload could still send ''
   // — keep the defensive empty-string guard via a widened comparison.
   const systemType = raw.t != null && (raw.t as string) !== '' ? raw.t : null;
+  // A `_hidden: true` document is never user-visible in Rocket.Chat. The common
+  // source is the `Message_KeepHistory` edit clone (a separate `_id` carrying
+  // the PRE-EDIT text + `parent: <original id>`), which on leaky deployments
+  // would otherwise be ingested as a second, ordinary message and surface as a
+  // duplicate of the edited one. Ingest it as soft-deleted so every read/search
+  // path (all gated on `deleted = 0`) skips it, and a later re-upsert of the
+  // same id stays soft-deleted rather than resurfacing.
+  const deleted = raw._hidden === true ? 1 : 0;
   return {
     id: raw._id ?? '',
     rid: raw.rid ?? rid,
@@ -166,7 +181,7 @@ export function messageToRow(raw: RcWireMessage, rid: string): MessageRow {
     edited_at: toIso(raw.editedAt),
     system_type: systemType,
     attachments_json: attachmentsJson(raw.attachments as RcWireAttachment[] | undefined),
-    deleted: 0,
+    deleted,
     updated_at: toIso(raw._updatedAt),
     mentions: mentionsJson(raw.mentions),
   };

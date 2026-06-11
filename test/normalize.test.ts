@@ -158,6 +158,28 @@ describe('messageToRow', () => {
     expect(messageToRow(plain(), RID).mentions).toBe('[]');
     expect(messageToRow(plain({ mentions: [] }), RID).mentions).toBe('[]');
   });
+
+  it('soft-deletes a Message_KeepHistory clone (_hidden: true)', () => {
+    // Shape captured from RC `cloneAndSaveAsHistoryByRecord`: a NEW _id carrying
+    // the PRE-EDIT text, `_hidden: true`, and `parent` = the original id. On
+    // leaky deployments this leaks through history/sync/search and would surface
+    // as a duplicate of the edited message; it must land soft-deleted.
+    const clone = plain({
+      _id: 'clone-xyz',
+      msg: "Yeah, outside of the team I can't manage the members it seems",
+      parent: 'm1',
+      _hidden: true,
+      editedAt: TS,
+    });
+    const row = messageToRow(clone, RID);
+    expect(row.deleted).toBe(1);
+    expect(row.id).toBe('clone-xyz');
+  });
+
+  it('keeps ordinary (non-hidden) messages visible (deleted: 0)', () => {
+    expect(messageToRow(plain({ _hidden: false }), RID).deleted).toBe(0);
+    expect(messageToRow(plain(), RID).deleted).toBe(0);
+  });
 });
 
 describe('rowToCompact', () => {
