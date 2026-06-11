@@ -281,6 +281,84 @@ describe('loadConfig profiles', () => {
     expect(cfg.readOnly).toBe(true);
   });
 
+  it('ROCKET_CLI_PROFILE env selects a profile when no explicit arg is passed', () => {
+    seedStore({
+      profiles: {
+        staging: { url: 'https://staging.example.com', token: 'stok', userId: 'suid' },
+      },
+    });
+    process.env['ROCKET_CLI_PROFILE'] = 'staging';
+    const cfg = loadConfig(); // no arg — env drives selection
+    expect(cfg.profile).toBe('staging');
+    expect(cfg.url).toBe('https://staging.example.com');
+    expect(cfg.token).toBe('stok');
+    expect(cfg.userId).toBe('suid');
+  });
+
+  it('explicit --profile arg wins over ROCKET_CLI_PROFILE env when both are set', () => {
+    seedStore({
+      profiles: {
+        prod: { url: 'https://prod.example.com', token: 'ptok', userId: 'puid' },
+        staging: { url: 'https://staging.example.com', token: 'stok', userId: 'suid' },
+      },
+    });
+    process.env['ROCKET_CLI_PROFILE'] = 'staging';
+    // Explicit arg takes precedence — the env var resolves to 'staging' only via
+    // the fallback `profileName ?? process.env['ROCKET_CLI_PROFILE']` path, so
+    // when profileName is supplied the env is never consulted.
+    const cfg = loadConfig('prod');
+    expect(cfg.profile).toBe('prod');
+    expect(cfg.url).toBe('https://prod.example.com');
+    expect(cfg.token).toBe('ptok');
+  });
+
+  it('ROCKET_CLI_READ_ONLY=true overrides profile readOnly:false', () => {
+    seedStore({
+      profiles: {
+        work: { url: 'https://work.example.com', token: 'wtok', userId: 'wuid', readOnly: false },
+      },
+    });
+    process.env['ROCKET_CLI_READ_ONLY'] = 'true';
+    // env wins over profile value — env is the outermost override
+    const cfg = loadConfig('work');
+    expect(cfg.readOnly).toBe(true);
+  });
+
+  it('ROCKET_CLI_READ_ONLY=1 also sets readOnly true', () => {
+    seedStore({
+      profiles: {
+        work: { url: 'https://work.example.com', token: 'wtok', userId: 'wuid' },
+      },
+    });
+    process.env['ROCKET_CLI_READ_ONLY'] = '1';
+    const cfg = loadConfig('work');
+    expect(cfg.readOnly).toBe(true);
+  });
+
+  it('ROCKET_CLI_READ_ONLY=false overrides profile readOnly:true — env wins', () => {
+    seedStore({
+      profiles: {
+        prod: { url: 'https://prod.example.com', token: 't', userId: 'u', readOnly: true },
+      },
+    });
+    process.env['ROCKET_CLI_READ_ONLY'] = 'false';
+    // env is authoritative for tuning knobs; 'false' disables readOnly even when
+    // the profile declares it, so operators can temporarily override from env.
+    const cfg = loadConfig('prod');
+    expect(cfg.readOnly).toBe(false);
+  });
+
+  it('ROCKET_CLI_READ_ONLY=0 also sets readOnly false', () => {
+    seedStore({
+      profiles: {
+        prod: { url: 'https://prod.example.com', token: 't', userId: 'u', readOnly: true },
+      },
+    });
+    process.env['ROCKET_CLI_READ_ONLY'] = '0';
+    const cfg = loadConfig('prod');
+    expect(cfg.readOnly).toBe(false);
+  });
+
   it('env-only config (no profile) defaults readOnly to false and uses the legacy db path', () => {
     process.env['ROCKETCHAT_URL'] = 'https://env.example.com';
     process.env['ROCKETCHAT_TOKEN'] = 'etok';

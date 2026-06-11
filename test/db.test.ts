@@ -683,6 +683,20 @@ describe('repository', () => {
     expect(db.findRooms({ nameLike: 'gen' }).map((r) => r.rid)).toEqual(['c1']);
     expect(db.findRooms().length).toBe(3);
   });
+
+  it('readOnly gates server writes only — cache sync still writes locally', () => {
+    // The `readOnly` flag lives on Config, not on Db. The database layer is
+    // intentionally unaware of readOnly so that sync (a local read-from-server
+    // operation, not a write-to-server one) can still populate the cache.
+    // This test documents that contract: even when the active config is
+    // readOnly:true, upsertMessages and upsertRoom succeed without error.
+    db = openDb(':memory:');
+    db.upsertRoom(room('r1'));
+    db.upsertMessages([msg('m1', { text: 'synced from server while read-only' })]);
+    // The row is present and readable — local cache is not blocked.
+    expect(db.getMessage('m1')?.text).toBe('synced from server while read-only');
+    expect(db.getRoom('r1')?.rid).toBe('r1');
+  });
 });
 
 describe('guardInstance (identity binding)', () => {
@@ -726,5 +740,34 @@ describe('guardInstance (identity binding)', () => {
     db.setMeta('instance_url', 'https://a.example.com');
     db.setMeta('instance_user_id', 'userA');
     expect(() => db.guardInstance('https://a.example.com', 'userB', fail)).toThrow('mismatch');
+  });
+
+  it('cross-profile same-db guard — re-opening a file with a different profile identity throws', () => {
+    // Profile A stamps the db file. Profile B (different url+user) must NOT
+    // be allowed to reuse the same file — guardInstance throws on mismatch.
+    const dir = mkdtempSync(join(tmpdir(), 'rocket-guard-'));
+    const path = join(dir, 'shared.db');
+    try {
+      // Profile A opens and stamps.
+      const dbA = openDb(path);
+      dbA.guardInstance('https://a.example.com', 'userA', fail);
+      dbA.close();
+
+      // Profile B tries to open the same file with different identity.
+      const dbB = openDb(path);
+      expect(() =>
+        dbB.guardInstance(
+          'https://b.example.com',
+          'userB',
+          (stored) =>
+            new Error(
+              `identity mismatch: stored url=${stored.url} userId=${stored.userId}`,
+            ),
+        ),
+      ).toThrow(/identity mismatch/);
+      dbB.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
