@@ -5,7 +5,7 @@ Rocket.Chat bridge with a local SQLite/FTS5 cache — CLI for humans, MCP server
 On first read a room is backfilled (up to 500 messages / 30 days). Subsequent reads hit `chat.syncMessages` for deltas (60 s TTL), then serve from SQLite — zero network on cache-fresh rooms. Full-text search runs across all cached rooms locally via FTS5; when scoped to a room it falls back to the server and ingests the results into the cache.
 
 ```mermaid
-graph LR
+graph TB
     Agent["LLM Agent\n(Claude · MCP stdio)"]
     Human["Human\n(CLI)"]
 
