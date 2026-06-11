@@ -438,6 +438,19 @@ Eighteen tools are exposed to the LLM agent (fifteen under a read-only profile �
 
 Attachment links appear in `get_messages` output as `[file] name -> /file-upload/…`; pass the part after `->` as `fileUrl` to `download_attachment`.
 
+## Agent skills
+
+`skills/` ships six Claude Code skills that teach an agent how to drive rocket-cli (via the MCP tools, or the `--json` CLI as a fallback):
+
+- **rocket-attention** — triage "what needs my attention" (mentions, unread DMs/threads/channels).
+- **rocket-catchup** — summarize or recap one specific room or thread.
+- **rocket-find** — full-text search for a known message, link, or file.
+- **rocket-link** — open any pasted Rocket.Chat URL and show how to act on it.
+- **rocket-send** — send/reply/react/upload, with read-only degradation.
+- **rocket-guide** — reference: tool table, cache model, profiles, CLI↔MCP mapping.
+
+Install them with `./scripts/install-skills.sh` — it symlinks each `skills/<name>/` into `~/.claude/skills/`, so edits in this repo propagate live. Re-running is safe; `./scripts/install-skills.sh --uninstall` removes only the symlinks that point back into this repo.
+
 ## Architecture
 
 1. **Lazy backfill** — first access to a room fetches up to 500 messages / 30 days via `channels.history` / `groups.history` / `im.history`.
