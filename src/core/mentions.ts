@@ -99,7 +99,13 @@ export async function collectMentions(
   // mentions almost always arrive in a room that now shows unread.
   await app.rooms.refresh();
   let refreshing = false;
-  for (const room of app.db.findUnreadRooms()) {
+  // Freshen with includeHidden=true: mentions always matter, so a room whose
+  // "Hide unread counter" setting is on must still have its window pulled for
+  // the mention search — the UI-parity default predicate would skip a hidden
+  // room without a server-side mention count, but a freshly-arrived mention
+  // can live there before the count propagates. findMentions then matches the
+  // actual @username in the cached text, independent of the hide flags.
+  for (const room of app.db.findUnreadRooms({ includeHidden: true })) {
     // Shallow freshening (same rationale as collectUnread): a never-synced
     // unread room only needs the window after its last-read watermark for
     // triage; the FTS query bounds the mention search itself. `ls` is the exact

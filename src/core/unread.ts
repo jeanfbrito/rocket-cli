@@ -48,6 +48,15 @@ export interface UnreadRoom {
    */
   activityOnly: boolean;
   /**
+   * True when this room is hidden in the UI (its "Hide unread counter" setting
+   * is on) but surfaced anyway because the user is mentioned in it — the one
+   * exception the Rocket.Chat sidebar keeps for hidden rooms. Lets the report
+   * label it distinctly ("hidden room, mentioned") instead of as a normal
+   * unread. Always false for ordinary rooms, and (when `--all`/includeHidden is
+   * used) for hidden rooms pulled in without a mention.
+   */
+  hiddenMentioned: boolean;
+  /**
    * Whether `messages` was sliced exactly (ts > ls) or approximated. When the
    * room has no last-read watermark (`ls` is null — never opened), we fall back
    * to the newest `unreadCount` messages as a best-effort approximation.
@@ -74,6 +83,13 @@ export interface CollectUnreadOptions {
   limitPerRoom?: number;
   /** Whether to include unread thread replies. Default true. */
   includeThreads?: boolean;
+  /**
+   * Include rooms whose "Hide unread counter" setting is on, with the legacy
+   * (pre-parity) behavior — every room with any unread signal, regardless of
+   * the hide flag. Default false = UI parity (hidden rooms appear only via the
+   * mention exception). Backs the CLI `--all` flag / MCP `includeHidden` input.
+   */
+  includeHidden?: boolean;
 }
 
 /** Parse a room's stored tunread JSON into a string[] of parent ids. */
@@ -107,11 +123,12 @@ export async function collectUnread(
 ): Promise<UnreadReport> {
   const limit = Math.max(1, opts.limitPerRoom ?? 50);
   const includeThreads = opts.includeThreads ?? true;
+  const includeHidden = opts.includeHidden ?? false;
 
   // Force fresh subscription data: unread watermarks must be current.
   await app.rooms.refresh();
 
-  const unreadRooms = app.db.findUnreadRooms();
+  const unreadRooms = app.db.findUnreadRooms({ includeHidden });
   const rooms: UnreadRoom[] = [];
   let totalMessages = 0;
   let totalThreads = 0;
@@ -200,6 +217,12 @@ async function collectRoom(
       },
       unreadCount: room.unread,
       activityOnly,
+      // hidden_mentioned is a computed column set by findUnreadRooms only for a
+      // hidden room surfaced via the mention exception (default predicate). In
+      // the includeHidden path it is also 1 for any hidden room, but those have
+      // no mention — the flag is only meaningful under UI-parity, where it is
+      // exactly "hidden but mentioned". Default false for ordinary rooms.
+      hiddenMentioned: (room.hidden_mentioned ?? 0) === 1,
       approximate,
       messages,
       unreadThreads,

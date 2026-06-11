@@ -267,10 +267,13 @@ node dist/cli.js profiles --add work --url https://chat.company.com --token <t> 
 
 Read-only: lists messages with `ts` newer than each room's server-side last-read watermark (the marker the UI sets when you open a room). It never calls `subscriptions.read` and never clears unread badges. Rooms with no read marker fall back to a newest-N approximation, flagged in the output.
 
+Which rooms count as unread mirrors the Rocket.Chat sidebar exactly. A room is surfaced when it has an unread signal (unread count, the `alert` flag, or unread thread replies) **and** its "Hide unread counter" room setting (`hideUnreadStatus`) is off — the same `(alert || unread || tunread) && !hideUnreadStatus` predicate the sidebar uses (`apps/meteor/client/sidebar/hooks/useRoomList.ts`). The one exception the UI keeps for a hidden room is an explicit mention: a room with "Hide unread counter" on still appears when you are mentioned in it (`userMentions`/`groupMentions`, or a thread reply that mentions you) and "Hide mention" is off, matching `getSubscriptionUnreadData.ts`. Such a room is labeled `hidden room, mentioned` in the output and carries `hiddenMentioned: true` in the JSON report. Use `--all` to ignore the hide setting and list every room with any unread signal (the pre-parity behavior).
+
 | Flag | Description |
 |---|---|
 | `--limit <n>` | Max messages per room (default 50) |
 | `--no-threads` | Skip unread thread replies (threads shown by default) |
+| `--all` | Also include rooms whose "Hide unread counter" setting is on (default matches the UI: hidden rooms appear only when you are mentioned) |
 
 ### `attention` flags
 
@@ -414,8 +417,8 @@ Eighteen tools are exposed to the LLM agent (fifteen under a read-only profile �
 |---|---|---|
 | `list_rooms` | List subscribed channels, groups, and DMs | `filter?`, `type?` (channel/group/dm), `limit?` (default 50) |
 | `get_messages` | Read messages from a room, newest first | `room`, `count?` (default 30, max 100), `before?`, `after?` (ISO 8601), `includeSystem?` |
-| `get_attention` | One-call triage of everything needing attention — mentions, unread DMs, unread threads, unread channels, prioritized + deduplicated, every item linked (read-only) | `sinceDays?` (default 7, max 90), `limitPerSection?` (default 30, max 100), `includeChannelWide?` (default false) |
-| `get_unread` | List everything unread since you last read each room (read-only; never clears badges) | `limitPerRoom?` (default 50, max 100), `includeThreads?` (default true) |
+| `get_attention` | One-call triage of everything needing attention — mentions, unread DMs, unread threads, unread channels, prioritized + deduplicated, every item linked (read-only) | `sinceDays?` (default 7, max 90), `limitPerSection?` (default 30, max 100), `includeChannelWide?` (default false), `includeHidden?` (default false) |
+| `get_unread` | List everything unread since you last read each room, at sidebar parity — rooms with "Hide unread counter" on are skipped unless you are mentioned (read-only; never clears badges) | `limitPerRoom?` (default 50, max 100), `includeThreads?` (default true), `includeHidden?` (default false) |
 | `get_mentions` | Messages that mention the user (@username) across all cached rooms, each with a link (read-only) | `sinceDays?` (default 7, max 90), `limit?` (default 50, max 100), `includeChannelWide?` (default false) |
 | `get_message_context` | Show the conversation around a message id; thread replies pivot to their whole thread | `messageId`, `before?` (0-50, default 10), `after?` (0-50, default 5) |
 | `open_url` | Open any pasted Rocket.Chat link (message, thread, or channel) and return its content + the ids needed to reply/react | `url`, `count?` (1-100, default 20) |

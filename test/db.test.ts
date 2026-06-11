@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import BetterSqlite3 from 'better-sqlite3';
 import { openDb, type Db, type MessageRow, type RoomRow } from '../src/core/db.js';
+import { MIGRATIONS } from '../src/core/migrations.js';
 
 function room(rid: string, over: Partial<RoomRow> = {}): RoomRow {
   return {
@@ -65,7 +67,7 @@ function ftsRowids(db: Db, query: string): number[] {
 describe('migrations', () => {
   it('migrates a :memory: db cleanly and sets schema_version', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('6');
+    expect(db.getMeta('schema_version')).toBe('7');
     const tables = (
       db.conn
         .prepare(
@@ -88,7 +90,7 @@ describe('migrations', () => {
 
   it('v4 adds ls + tunread columns to rooms', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('6');
+    expect(db.getMeta('schema_version')).toBe('7');
     const cols = (
       db.conn.prepare('PRAGMA table_info(rooms)').all() as { name: string }[]
     ).map((c) => c.name);
@@ -98,7 +100,7 @@ describe('migrations', () => {
 
   it('v6 adds an alert column to rooms, defaulting to 0', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('6');
+    expect(db.getMeta('schema_version')).toBe('7');
     const cols = (
       db.conn.prepare('PRAGMA table_info(rooms)').all() as { name: string }[]
     ).map((c) => c.name);
@@ -109,9 +111,69 @@ describe('migrations', () => {
     db.close();
   });
 
+  it('v7 adds the hide-unread / mention bookkeeping columns to rooms, with defaults', () => {
+    const db = openDb(':memory:');
+    expect(db.getMeta('schema_version')).toBe('7');
+    const cols = (
+      db.conn.prepare('PRAGMA table_info(rooms)').all() as { name: string }[]
+    ).map((c) => c.name);
+    expect(cols).toEqual(
+      expect.arrayContaining([
+        'hide_unread_status',
+        'hide_mention_status',
+        'user_mentions',
+        'group_mentions',
+        'tunread_user',
+      ]),
+    );
+    db.upsertRoom(room('r1'));
+    const r = db.getRoom('r1');
+    expect(r?.hide_unread_status).toBe(0);
+    expect(r?.hide_mention_status).toBe(0);
+    expect(r?.user_mentions).toBe(0);
+    expect(r?.group_mentions).toBe(0);
+    expect(r?.tunread_user).toBe('[]');
+    db.close();
+  });
+
+  it('v7 applies on top of a pre-v7 (v6) db, preserving existing rows', () => {
+    // Build a genuine pre-v7 db by running ONLY migrations v1..v6 by hand, seed a
+    // row, then let openDb apply the pending v7 migration. The pre-existing row
+    // must survive with the new columns at their defaults.
+    const dir = mkdtempSync(join(tmpdir(), 'rocket-db-v7-'));
+    const path = join(dir, 'cache.db');
+    try {
+      const raw = new BetterSqlite3(path);
+      for (const m of MIGRATIONS.filter((mig) => mig.version <= 6)) {
+        for (const stmt of m.statements) raw.exec(stmt);
+      }
+      raw
+        .prepare(
+          `INSERT INTO rooms (rid, name, fname, t, unread, alert) VALUES ('legacy','legacy','legacy','c',4,1)`,
+        )
+        .run();
+      raw.prepare("INSERT INTO meta (key, value) VALUES ('schema_version','6')").run();
+      raw.close();
+
+      const db = openDb(path);
+      expect(db.getMeta('schema_version')).toBe('7');
+      const r = db.getRoom('legacy');
+      expect(r?.unread).toBe(4);
+      expect(r?.alert).toBe(1);
+      expect(r?.hide_unread_status).toBe(0);
+      expect(r?.hide_mention_status).toBe(0);
+      expect(r?.user_mentions).toBe(0);
+      expect(r?.group_mentions).toBe(0);
+      expect(r?.tunread_user).toBe('[]');
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('v5 adds a mentions column + partial index, defaulting to []', () => {
     const db = openDb(':memory:');
-    expect(db.getMeta('schema_version')).toBe('6');
+    expect(db.getMeta('schema_version')).toBe('7');
 
     const cols = (
       db.conn.prepare('PRAGMA table_info(messages)').all() as { name: string }[]
@@ -160,7 +222,7 @@ describe('migrations', () => {
 
       const db2 = openDb(path);
       // Still at the latest version, prior data preserved → no destructive re-run.
-      expect(db2.getMeta('schema_version')).toBe('6');
+      expect(db2.getMeta('schema_version')).toBe('7');
       expect(db2.getMeta('instance_url')).toBe('https://example.com');
       db2.close();
     } finally {
@@ -493,7 +555,7 @@ describe('repository', () => {
     expect(r?.fully_backfilled).toBe(1);
   });
 
-  it('findUnreadRooms returns rooms with unread > 0 OR alert OR non-empty tunread', () => {
+  it('findUnreadRooms returns rooms with unread > 0 OR alert OR non-empty tunread (non-hidden)', () => {
     db = openDb(':memory:');
     db.upsertRooms([
       room('read', { name: 'read', unread: 0, tunread: '[]', alert: 0 }),
@@ -508,6 +570,85 @@ describe('repository', () => {
       'hasThread',
       'hasUnread',
     ]);
+  });
+
+  it('findUnreadRooms EXCLUDES a hidden room (hide_unread_status=1) with no mention by default (UI parity)', () => {
+    db = openDb(':memory:');
+    db.upsertRooms([
+      room('plain', { name: 'plain', unread: 2, alert: 1 }),
+      // "Hide unread counter" on, has unread/alert but no mention -> hidden in UI.
+      room('hidden', {
+        name: 'hidden',
+        unread: 5,
+        alert: 1,
+        hide_unread_status: 1,
+        user_mentions: 0,
+        group_mentions: 0,
+        tunread_user: '[]',
+      }),
+    ]);
+    // Default predicate: only the non-hidden room surfaces.
+    expect(db.findUnreadRooms().map((r) => r.rid)).toEqual(['plain']);
+    // The surfaced room is not flagged as a hidden mention.
+    expect(db.findUnreadRooms()[0]!.hidden_mentioned).toBe(0);
+  });
+
+  it('findUnreadRooms INCLUDES a hidden room when mentioned, flagged hidden_mentioned=1', () => {
+    db = openDb(':memory:');
+    db.upsertRooms([
+      // Hidden but the user is @-mentioned (userMentions>0), mentions not hidden.
+      room('hiddenMentioned', {
+        name: 'hiddenMentioned',
+        unread: 1,
+        alert: 1,
+        hide_unread_status: 1,
+        hide_mention_status: 0,
+        user_mentions: 2,
+      }),
+      // Hidden, mentioned via a thread reply (tunread_user), mentions not hidden.
+      room('hiddenThreadMention', {
+        name: 'hiddenThreadMention',
+        unread: 0,
+        hide_unread_status: 1,
+        hide_mention_status: 0,
+        tunread_user: '["p9"]',
+      }),
+      // Hidden AND hide_mention_status=1: even a mention stays hidden.
+      room('hiddenMuted', {
+        name: 'hiddenMuted',
+        unread: 1,
+        hide_unread_status: 1,
+        hide_mention_status: 1,
+        user_mentions: 3,
+      }),
+    ]);
+    const rows = db.findUnreadRooms();
+    expect(rows.map((r) => r.rid).sort()).toEqual([
+      'hiddenMentioned',
+      'hiddenThreadMention',
+    ]);
+    // Both surfaced rooms carry the distinct flag.
+    for (const r of rows) expect(r.hidden_mentioned).toBe(1);
+  });
+
+  it('findUnreadRooms({ includeHidden: true }) returns hidden rooms with legacy behavior', () => {
+    db = openDb(':memory:');
+    db.upsertRooms([
+      room('plain', { name: 'plain', unread: 2 }),
+      room('hidden', { name: 'hidden', unread: 5, hide_unread_status: 1 }),
+      room('hiddenMuted', {
+        name: 'hiddenMuted',
+        unread: 1,
+        hide_unread_status: 1,
+        hide_mention_status: 1,
+      }),
+    ]);
+    const rows = db.findUnreadRooms({ includeHidden: true });
+    expect(rows.map((r) => r.rid).sort()).toEqual(['hidden', 'hiddenMuted', 'plain']);
+    // A hidden room pulled in by includeHidden WITHOUT a mention is NOT flagged
+    // hidden_mentioned — the flag means "hidden but genuinely mentioned".
+    const hidden = rows.find((r) => r.rid === 'hidden')!;
+    expect(hidden.hidden_mentioned).toBe(0);
   });
 
   it('findRooms filters by type and nameLike', () => {

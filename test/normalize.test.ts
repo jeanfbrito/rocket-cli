@@ -269,7 +269,7 @@ describe('rowToCompactWithLink', () => {
 });
 
 describe('subscriptionToRoomRow', () => {
-  it('maps rid/name/fname/t/unread, sub_updated_at, ls, tunread and alert', () => {
+  it('maps rid/name/fname/t/unread, sub_updated_at, ls, tunread, alert + hide/mention fields', () => {
     const row = subscriptionToRoomRow({
       rid: RID,
       name: 'general',
@@ -280,6 +280,11 @@ describe('subscriptionToRoomRow', () => {
       ls: TS,
       tunread: ['p1', 'p2'],
       alert: true,
+      hideUnreadStatus: true,
+      hideMentionStatus: true,
+      userMentions: 2,
+      groupMentions: 1,
+      tunreadUser: ['p1'],
     } as RcWireSubscription);
     expect(row).toEqual({
       rid: RID,
@@ -291,6 +296,11 @@ describe('subscriptionToRoomRow', () => {
       ls: TS,
       tunread: '["p1","p2"]',
       alert: 1,
+      hide_unread_status: 1,
+      hide_mention_status: 1,
+      user_mentions: 2,
+      group_mentions: 1,
+      tunread_user: '["p1"]',
     });
   });
 
@@ -313,5 +323,14 @@ describe('subscriptionToRoomRow', () => {
     expect(row.ls).toBeNull();
     expect(row.tunread).toBe('[]');
     expect(row.alert).toBe(0);
+  });
+
+  it('defaults the v7 hide/mention fields when the wire omits them', () => {
+    const row = subscriptionToRoomRow({ rid: RID, t: 'c', unread: 1 } as RcWireSubscription);
+    expect(row.hide_unread_status).toBe(0);
+    expect(row.hide_mention_status).toBe(0);
+    expect(row.user_mentions).toBe(0);
+    expect(row.group_mentions).toBe(0);
+    expect(row.tunread_user).toBe('[]');
   });
 });

@@ -28,6 +28,11 @@ function printHuman(report: UnreadReport): void {
     if (threadCount > 0) {
       parts.push(`${threadCount} ${threadCount === 1 ? 'thread' : 'threads'}`);
     }
+    // A hidden room ("Hide unread counter" on) is only surfaced because the user
+    // is mentioned — label it so the count isn't read as ordinary unread.
+    if (r.hiddenMentioned) {
+      parts.push('hidden room, mentioned');
+    }
     const sigil = r.room.type === 'dm' ? '@' : '#';
     out.write(`\n── ${sigil}${r.room.name} (${parts.join(', ')}) ──\n`);
     if (r.approximate) {
@@ -61,10 +66,15 @@ export function register(program: Command): void {
     .description('Show everything unread since you last read each room (read-only)')
     .option('--limit <n>', 'max messages per room', '50')
     .option('--no-threads', 'skip unread thread replies')
+    .option(
+      '--all',
+      'also include rooms whose "Hide unread counter" setting is on ' +
+        '(default matches the UI: hidden rooms appear only when you are mentioned)',
+    )
     .option('--json', 'output as a structured JSON report')
     .action(
       async (
-        opts: { limit: string; threads?: boolean; json?: boolean },
+        opts: { limit: string; threads?: boolean; all?: boolean; json?: boolean },
         command: Command,
       ) => {
         await withApp(async (app) => {
@@ -72,8 +82,13 @@ export function register(program: Command): void {
           // commander sets `threads` to false when --no-threads is passed;
           // default (flag absent) is true.
           const includeThreads = opts.threads !== false;
+          const includeHidden = opts.all === true;
 
-          const report = await collectUnread(app, { limitPerRoom, includeThreads });
+          const report = await collectUnread(app, {
+            limitPerRoom,
+            includeThreads,
+            includeHidden,
+          });
 
           if (command.optsWithGlobals<{ json?: boolean }>().json) {
             process.stdout.write(JSON.stringify(report) + '\n');

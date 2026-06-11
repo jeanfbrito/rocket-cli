@@ -70,6 +70,14 @@ export interface CollectAttentionOptions {
   limitPerSection?: number;
   /** Also match channel-wide @all / @here mentions. Default false. */
   includeChannelWide?: boolean;
+  /**
+   * Include rooms whose "Hide unread counter" setting is on (legacy behavior),
+   * passed through to the underlying unread view. Default false = UI parity
+   * (hidden rooms surface only via the mention exception). Note: mentions are
+   * found independently via collectMentions, so a mention in a hidden room is
+   * never dropped regardless of this flag.
+   */
+  includeHidden?: boolean;
 }
 
 /**
@@ -95,6 +103,7 @@ export async function collectAttention(
   const sinceDays = Math.max(1, opts.sinceDays ?? 7);
   const limitPerSection = Math.max(1, opts.limitPerSection ?? 30);
   const includeChannelWide = opts.includeChannelWide ?? false;
+  const includeHidden = opts.includeHidden ?? false;
 
   const [mentionsReport, unreadReport]: [MentionsReport, UnreadReport] =
     await Promise.all([
@@ -104,7 +113,11 @@ export async function collectAttention(
         limit: limitPerSection,
         includeChannelWide,
       }),
-      collectUnread(app, { limitPerRoom: limitPerSection, includeThreads: true }),
+      collectUnread(app, {
+        limitPerRoom: limitPerSection,
+        includeThreads: true,
+        includeHidden,
+      }),
     ]);
 
   // Build the set of all unread message ids (main + thread replies) so a

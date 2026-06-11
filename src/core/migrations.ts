@@ -258,6 +258,44 @@ export const MIGRATIONS: Migration[] = [
     version: 6,
     statements: [`ALTER TABLE rooms ADD COLUMN alert INTEGER NOT NULL DEFAULT 0;`],
   },
+  {
+    // v7 — per-room "hide unread" room setting + mention bookkeeping, so the
+    // `unread` view reaches exact parity with the Rocket.Chat sidebar.
+    //
+    // WHY this is needed: the sidebar's Unread section hides a room whose
+    // per-subscription `hideUnreadStatus` ("Hide unread counter" room setting)
+    // is true (apps/meteor/client/sidebar/hooks/useRoomList.ts:
+    // `(room.alert || room.unread || room.tunread?.length) && !room.hideUnreadStatus`).
+    // Our prior predicate ignored that flag and over-reported every such room.
+    // Worse, the server still flips `alert` on those rooms, so a busy account
+    // with several "muted" rooms saw a large false unread count.
+    //
+    // There is ONE exception the UI keeps even for a hidden room: an explicit
+    // mention. getSubscriptionUnreadData.ts computes
+    // `showUnread = (!hideUnreadStatus || (!hideMentionStatus && (mentions ||
+    // groupMentions))) && total > 0`, where `mentions = userMentions +
+    // tunreadUser.length`. So a hidden room still surfaces when the user is
+    // mentioned (`userMentions`/`groupMentions` > 0, or a thread reply mentions
+    // them: `tunreadUser`) AND mentions are not also hidden (`hideMentionStatus`
+    // false). All five fields are in the subscriptions.get projection
+    // (apps/meteor/lib/publishFields.ts).
+    //
+    // Column shapes: the two hide flags are stored as INTEGER 0|1 (SQLite has no
+    // boolean); the wire type is `?: true` so absence => 0. `user_mentions` /
+    // `group_mentions` are server counts (required numbers on the wire).
+    // `tunread_user` is a JSON array TEXT (thread parents whose unread replies
+    // mention the user), mirroring the existing `tunread` column. All NOT NULL
+    // with defaults so existing rows and re-upserts that omit them stay
+    // well-defined; old rows self-heal on the next subscription refresh.
+    version: 7,
+    statements: [
+      `ALTER TABLE rooms ADD COLUMN hide_unread_status INTEGER NOT NULL DEFAULT 0;`,
+      `ALTER TABLE rooms ADD COLUMN hide_mention_status INTEGER NOT NULL DEFAULT 0;`,
+      `ALTER TABLE rooms ADD COLUMN user_mentions INTEGER NOT NULL DEFAULT 0;`,
+      `ALTER TABLE rooms ADD COLUMN group_mentions INTEGER NOT NULL DEFAULT 0;`,
+      `ALTER TABLE rooms ADD COLUMN tunread_user TEXT NOT NULL DEFAULT '[]';`,
+    ],
+  },
 ];
 
 /** Highest schema version defined by the migration set. */

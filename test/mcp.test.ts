@@ -376,6 +376,36 @@ describe('mcp server', () => {
     expect(r.unreadThreads[0].messages.map((m: any) => m.id)).toEqual(['rNew']);
   });
 
+  it('get_unread excludes a hidden room by default but includes it with includeHidden', async () => {
+    const ls = '2026-06-10T12:00:00.000Z';
+    // One visible unread room and one hidden ("Hide unread counter" on) room
+    // with unread/alert but no mention. UI parity hides the latter by default.
+    rc.onSubscriptions({
+      update: [
+        { rid: 'C1', name: 'visible', fname: 'Visible', t: 'c', unread: 1, alert: true, ls },
+        { rid: 'C2', name: 'muted', fname: 'Muted', t: 'c', unread: 3, alert: true, ls, hideUnreadStatus: true },
+      ],
+      remove: [],
+    });
+    db.upsertRoom({ rid: 'C1', name: 'visible', fname: 'Visible', t: 'c', unread: 0, sub_updated_at: null });
+    db.upsertRoom({ rid: 'C2', name: 'muted', fname: 'Muted', t: 'c', unread: 0, sub_updated_at: null });
+    db.setRoomSyncState('C1', { lastSyncedAt: new Date().toISOString() });
+    db.setRoomSyncState('C2', { lastSyncedAt: new Date().toISOString() });
+    db.upsertMessages([
+      { id: 'v1', rid: 'C1', author_id: 'u1', author_username: 'alice', author_name: 'Alice', text: 'visible unread', ts: '2026-06-10T13:00:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+      { id: 'm1', rid: 'C2', author_id: 'u2', author_username: 'bob', author_name: 'Bob', text: 'muted unread', ts: '2026-06-10T13:00:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+    ]);
+    client = await connect(app);
+
+    const def = resultJson(await client.callTool({ name: 'get_unread', arguments: {} }));
+    expect(def.rooms.map((r: any) => r.room.id)).toEqual(['C1']);
+
+    const all = resultJson(
+      await client.callTool({ name: 'get_unread', arguments: { includeHidden: true } }),
+    );
+    expect(all.rooms.map((r: any) => r.room.id).sort()).toEqual(['C1', 'C2']);
+  });
+
   it('get_attention prioritizes, dedupes, and sections by source', async () => {
     const ls = '2026-06-10T12:00:00.000Z';
     rc.onUserInfo({ user: { _id: 'uid', username: 'jean' } });

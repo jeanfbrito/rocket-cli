@@ -33,15 +33,24 @@ export function registerGetAttentionTool(server: McpServer, app: App): void {
           .boolean()
           .default(false)
           .describe('Also include channel-wide @all/@here mentions (default false).'),
+        includeHidden: z
+          .boolean()
+          .default(false)
+          .describe(
+            'Also include unread rooms whose "Hide unread counter" setting is ' +
+              'on (default false = UI parity). Mentions in hidden rooms always ' +
+              'surface regardless of this flag.',
+          ),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ sinceDays, limitPerSection, includeChannelWide }) => {
+    async ({ sinceDays, limitPerSection, includeChannelWide, includeHidden }) => {
       try {
         const report = await collectAttention(app, {
           sinceDays,
           limitPerSection,
           includeChannelWide,
+          includeHidden,
         });
         return ok(report);
       } catch (err) {

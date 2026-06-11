@@ -45,6 +45,35 @@ export interface ThreadSyncState {
   fullyLoaded?: boolean;
 }
 
+/**
+ * Build the named-param object for stmtUpsertRoom from a RoomRow, applying the
+ * NOT-NULL column defaults. Built explicitly (not `...room`) because RoomRow
+ * carries `hidden_mentioned`, a computed non-column field findUnreadRooms
+ * attaches — spreading it would feed stmtUpsertRoom an unused named param,
+ * which better-sqlite3 rejects.
+ */
+function roomBindParams(room: RoomRow): Record<string, unknown> {
+  return {
+    rid: room.rid,
+    name: room.name,
+    fname: room.fname,
+    t: room.t,
+    unread: room.unread,
+    last_synced_at: room.last_synced_at ?? null,
+    oldest_loaded_ts: room.oldest_loaded_ts ?? null,
+    fully_backfilled: room.fully_backfilled ?? 0,
+    sub_updated_at: room.sub_updated_at,
+    ls: room.ls ?? null,
+    tunread: room.tunread ?? '[]',
+    alert: room.alert ?? 0,
+    hide_unread_status: room.hide_unread_status ?? 0,
+    hide_mention_status: room.hide_mention_status ?? 0,
+    user_mentions: room.user_mentions ?? 0,
+    group_mentions: room.group_mentions ?? 0,
+    tunread_user: room.tunread_user ?? '[]',
+  };
+}
+
 const MUTABLE_MESSAGE_COLUMNS = [
   'rid',
   'author_id',
@@ -109,10 +138,14 @@ export class Db {
     this.stmtUpsertRoom = conn.prepare(
       `INSERT INTO rooms (
          rid, name, fname, t, unread, last_synced_at,
-         oldest_loaded_ts, fully_backfilled, sub_updated_at, ls, tunread, alert
+         oldest_loaded_ts, fully_backfilled, sub_updated_at, ls, tunread, alert,
+         hide_unread_status, hide_mention_status, user_mentions, group_mentions,
+         tunread_user
        ) VALUES (
          @rid, @name, @fname, @t, @unread, @last_synced_at,
-         @oldest_loaded_ts, @fully_backfilled, @sub_updated_at, @ls, @tunread, @alert
+         @oldest_loaded_ts, @fully_backfilled, @sub_updated_at, @ls, @tunread, @alert,
+         @hide_unread_status, @hide_mention_status, @user_mentions, @group_mentions,
+         @tunread_user
        )
        ON CONFLICT(rid) DO UPDATE SET
          name = excluded.name,
@@ -122,7 +155,12 @@ export class Db {
          sub_updated_at = excluded.sub_updated_at,
          ls = excluded.ls,
          tunread = excluded.tunread,
-         alert = excluded.alert`,
+         alert = excluded.alert,
+         hide_unread_status = excluded.hide_unread_status,
+         hide_mention_status = excluded.hide_mention_status,
+         user_mentions = excluded.user_mentions,
+         group_mentions = excluded.group_mentions,
+         tunread_user = excluded.tunread_user`,
     );
     this.stmtGetRoom = conn.prepare('SELECT * FROM rooms WHERE rid = ?');
 
@@ -178,16 +216,7 @@ export class Db {
     );
 
     this.txUpsertRooms = conn.transaction((rooms: RoomRow[]) => {
-      for (const room of rooms)
-        this.stmtUpsertRoom.run({
-          ...room,
-          last_synced_at: room.last_synced_at ?? null,
-          oldest_loaded_ts: room.oldest_loaded_ts ?? null,
-          fully_backfilled: room.fully_backfilled ?? 0,
-          ls: room.ls ?? null,
-          tunread: room.tunread ?? '[]',
-          alert: room.alert ?? 0,
-        });
+      for (const room of rooms) this.stmtUpsertRoom.run(roomBindParams(room));
     });
     this.txUpsertMessages = conn.transaction((rows: MessageRow[]) => {
       // `mentions` is optional on MessageRow (rows from non-normalize sources
@@ -257,15 +286,7 @@ export class Db {
   // ---- rooms --------------------------------------------------------------
 
   upsertRoom(room: RoomRow): void {
-    this.stmtUpsertRoom.run({
-      ...room,
-      last_synced_at: room.last_synced_at ?? null,
-      oldest_loaded_ts: room.oldest_loaded_ts ?? null,
-      fully_backfilled: room.fully_backfilled ?? 0,
-      ls: room.ls ?? null,
-      tunread: room.tunread ?? '[]',
-      alert: room.alert ?? 0,
-    });
+    this.stmtUpsertRoom.run(roomBindParams(room));
   }
 
   upsertRooms(rooms: RoomRow[]): void {
@@ -294,22 +315,48 @@ export class Db {
   }
 
   /**
-   * Rooms the Rocket.Chat sidebar shows under "Unread": a positive unread count,
-   * OR the `alert` flag set, OR a non-empty tunread (unread thread replies even
-   * when the main-channel unread count is zero). This mirrors the sidebar
-   * predicate `room.alert || room.unread || room.tunread?.length`
-   * (apps/meteor/client/sidebar/hooks/useRoomList.ts). The `alert` term is what
-   * surfaces rooms with plain unread messages on servers whose Unread_Count is
-   * the default 'user_and_group_mentions_only' (unread stays 0 there, only
-   * `alert` flips). Ordered by name for stable display. Read-only.
+   * Rooms the Rocket.Chat sidebar shows under "Unread", at exact UI parity.
+   *
+   * The sidebar adds a room to its Unread section when
+   *   `(room.alert || room.unread || room.tunread?.length) && !room.hideUnreadStatus`
+   * (apps/meteor/client/sidebar/hooks/useRoomList.ts). The `alert` term surfaces
+   * plain unread messages on servers whose Unread_Count is the default
+   * 'user_and_group_mentions_only' (unread stays 0 there, only `alert` flips).
+   * The `!hideUnreadStatus` guard hides rooms whose "Hide unread counter"
+   * setting is on — our prior predicate ignored it and over-reported.
+   *
+   * The ONE exception the UI keeps for a hidden room is an explicit mention:
+   * getSubscriptionUnreadData.ts surfaces it when
+   *   `hideMentionStatus = false AND (userMentions || groupMentions || tunreadUser.length)`.
+   * Such rooms are returned with `hidden_mentioned = 1` so reports can label
+   * them distinctly. Hidden-and-not-mentioned rooms are excluded.
+   *
+   * `includeHidden` (default false) reverts to the legacy behavior — every room
+   * with any unread signal, ignoring hideUnreadStatus — for the `--all` /
+   * `includeHidden` escape hatch. Ordered by name for stable display. Read-only.
    */
-  findUnreadRooms(): RoomRow[] {
+  findUnreadRooms(opts: { includeHidden?: boolean } = {}): RoomRow[] {
+    const hasUnreadSignal =
+      "(unread > 0 OR alert = 1 OR (tunread IS NOT NULL AND tunread != '[]'))";
+    const hasMention =
+      "(user_mentions > 0 OR group_mentions > 0 OR (tunread_user IS NOT NULL AND tunread_user != '[]'))";
+    // hidden_mentioned: 1 only for a hidden room that genuinely qualifies via
+    // the mention exception (hidden, mentions not also hidden, and an actual
+    // mention). Independent of includeHidden, so a hidden room pulled in by
+    // --all WITHOUT a mention is correctly 0 (not mislabeled "mentioned").
+    const hiddenMentionedExpr =
+      `CASE WHEN hide_unread_status = 1 AND hide_mention_status = 0 AND ${hasMention} ` +
+      `THEN 1 ELSE 0 END AS hidden_mentioned`;
+
+    const where = opts.includeHidden
+      ? hasUnreadSignal
+      : `(
+           (${hasUnreadSignal} AND hide_unread_status = 0)
+           OR (hide_unread_status = 1 AND hide_mention_status = 0 AND ${hasMention})
+         )`;
+
     return this.conn
-      .prepare(
-        `SELECT * FROM rooms
-         WHERE unread > 0 OR alert = 1 OR (tunread IS NOT NULL AND tunread != '[]')
-         ORDER BY name`,
-      )
+      .prepare(`SELECT *, ${hiddenMentionedExpr} FROM rooms WHERE ${where} ORDER BY name`)
       .all() as RoomRow[];
   }
 

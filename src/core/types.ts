@@ -57,6 +57,29 @@ export interface RoomRow {
    *  alert=1 as unread even when the unread *count* is 0 (mentions-only servers).
    *  Defaults to 0. From subscription. */
   alert?: number;
+  /** "Hide unread counter" room setting (0|1) from ISubscription.hideUnreadStatus.
+   *  When set, the sidebar hides the room from the Unread section. The unread
+   *  view excludes such rooms by default (UI parity), except when the user is
+   *  mentioned (see hide_mention_status). Defaults to 0. From subscription. */
+  hide_unread_status?: number;
+  /** "Hide mention" room setting (0|1) from ISubscription.hideMentionStatus.
+   *  When a room is hidden (hide_unread_status=1), an explicit mention still
+   *  surfaces it UNLESS this is also set. Defaults to 0. From subscription. */
+  hide_mention_status?: number;
+  /** Server count of direct (@me) mentions, from ISubscription.userMentions.
+   *  Drives the mention exception for hidden rooms. Defaults to 0. From subscription. */
+  user_mentions?: number;
+  /** Server count of group (@all/@here/role) mentions, from
+   *  ISubscription.groupMentions. Defaults to 0. From subscription. */
+  group_mentions?: number;
+  /** JSON array of thread-parent ids whose unread replies mention the user,
+   *  from ISubscription.tunreadUser. Part of the hidden-room mention exception.
+   *  Defaults to '[]'. From subscription. */
+  tunread_user?: string;
+  /** NOT a stored column — a computed flag set only by findUnreadRooms(): 1 when
+   *  the room is hidden (hide_unread_status=1) but surfaced via the mention
+   *  exception. Lets reports label it distinctly. Undefined elsewhere. */
+  hidden_mentioned?: number;
 }
 
 /**

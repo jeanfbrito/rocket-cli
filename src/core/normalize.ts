@@ -253,6 +253,10 @@ export function subscriptionToRoomRow(sub: RcWireSubscription): RoomRow {
   // toIso guard as the other dates. `tunread` is an optional string[] of thread
   // parent ids with unread replies; stringify it (default '[]').
   const tunread = Array.isArray(sub.tunread) ? sub.tunread : [];
+  // `tunreadUser` is the subset of thread parents whose unread replies mention
+  // the user — part of the hidden-room mention exception. Same JSON-array
+  // treatment as `tunread`.
+  const tunreadUser = Array.isArray(sub.tunreadUser) ? sub.tunreadUser : [];
   return {
     rid: sub.rid ?? '',
     name: sub.name ?? null,
@@ -265,5 +269,13 @@ export function subscriptionToRoomRow(sub: RcWireSubscription): RoomRow {
     // `alert` is the sidebar Unread flag; map the optional boolean to 0|1 for
     // the INTEGER column (default 0 when the wire omits it).
     alert: sub.alert ? 1 : 0,
+    // "Hide unread counter" / "Hide mention" room settings. Wire type is
+    // `?: true`; map to 0|1 (default 0 when absent).
+    hide_unread_status: sub.hideUnreadStatus ? 1 : 0,
+    hide_mention_status: sub.hideMentionStatus ? 1 : 0,
+    // Server mention counts (required numbers on the wire, but guard anyway).
+    user_mentions: typeof sub.userMentions === 'number' ? sub.userMentions : 0,
+    group_mentions: typeof sub.groupMentions === 'number' ? sub.groupMentions : 0,
+    tunread_user: JSON.stringify(tunreadUser),
   };
 }

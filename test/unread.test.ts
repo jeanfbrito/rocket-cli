@@ -258,6 +258,94 @@ describe('collectUnread', () => {
     expect(r.messages.map((m) => m.id)).toEqual(['new1']);
   });
 
+  it('UI PARITY: excludes a hidden room (hideUnreadStatus) with no mention by default', async () => {
+    // The reported over-count bug: a room whose "Hide unread counter" setting is
+    // on still flips `alert`, so the legacy predicate surfaced it. UI parity
+    // hides it unless the user is mentioned.
+    const ls = '2026-06-10T12:00:00.000Z';
+    rc.onSubscriptions({
+      update: [
+        sub({ rid: 'C1', name: 'visible', t: 'c', unread: 2, alert: true, ls }),
+        sub({
+          rid: 'C2',
+          name: 'muted',
+          t: 'c',
+          unread: 5,
+          alert: true,
+          ls,
+          hideUnreadStatus: true,
+        }),
+      ],
+      remove: [],
+    });
+    seedRoom(db, 'C1');
+    seedRoom(db, 'C2');
+
+    const report = await collectUnread(app);
+
+    // Only the non-hidden room surfaces.
+    expect(report.rooms.map((r) => r.room.id)).toEqual(['C1']);
+    expect(report.rooms[0]!.hiddenMentioned).toBe(false);
+  });
+
+  it('MENTION EXCEPTION: includes a hidden room when mentioned, flagged hiddenMentioned', async () => {
+    const ls = '2026-06-10T12:00:00.000Z';
+    rc.onSubscriptions({
+      update: [
+        sub({
+          rid: 'C1',
+          name: 'muted-but-mentioned',
+          t: 'c',
+          unread: 1,
+          alert: true,
+          ls,
+          hideUnreadStatus: true,
+          hideMentionStatus: false,
+          userMentions: 1,
+        }),
+      ],
+      remove: [],
+    });
+    seedRoom(db, 'C1');
+    db.upsertMessages([
+      { id: 'm1', rid: 'C1', author_id: 'u2', author_username: 'bob', author_name: 'Bob', text: 'hey @me', ts: '2026-06-10T13:00:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null },
+    ]);
+
+    const report = await collectUnread(app);
+
+    expect(report.rooms.map((r) => r.room.id)).toEqual(['C1']);
+    expect(report.rooms[0]!.hiddenMentioned).toBe(true);
+    expect(report.rooms[0]!.messages.map((m) => m.id)).toEqual(['m1']);
+  });
+
+  it('includeHidden=true includes hidden rooms with the legacy behavior (no mention flag)', async () => {
+    const ls = '2026-06-10T12:00:00.000Z';
+    rc.onSubscriptions({
+      update: [
+        sub({ rid: 'C1', name: 'visible', t: 'c', unread: 2, alert: true, ls }),
+        sub({
+          rid: 'C2',
+          name: 'muted',
+          t: 'c',
+          unread: 5,
+          alert: true,
+          ls,
+          hideUnreadStatus: true,
+        }),
+      ],
+      remove: [],
+    });
+    seedRoom(db, 'C1');
+    seedRoom(db, 'C2');
+
+    const report = await collectUnread(app, { includeHidden: true });
+
+    expect(report.rooms.map((r) => r.room.id).sort()).toEqual(['C1', 'C2']);
+    // The hidden room came in WITHOUT a mention -> not flagged hiddenMentioned.
+    const muted = report.rooms.find((r) => r.room.id === 'C2')!;
+    expect(muted.hiddenMentioned).toBe(false);
+  });
+
   it('STALENESS REGRESSION: force-refreshes even when the cache is fresh', async () => {
     // Seed a fresh refresh timestamp so a TTL-gated ensureFresh() would skip the
     // network entirely. Pre-seed the cached room as fully read (unread=0,
