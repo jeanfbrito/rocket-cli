@@ -147,7 +147,7 @@ describe('SyncEngine backfill', () => {
   it('pages history backwards, sets watermark/horizon, marks fully_backfilled on short page', async () => {
     db = openDb(':memory:');
     db.upsertRoom(room('r1'));
-    const base = Date.parse('2026-06-10T12:00:00.000Z');
+    const base = Date.now() - 60 * 60 * 1000;
 
     const rc = new FakeRc().on(HIST, (_params, n) => {
       if (n === 0) {
@@ -184,7 +184,7 @@ describe('SyncEngine backfill', () => {
   it('stops at backfillLimit when the room is deeper than the cap', async () => {
     db = openDb(':memory:');
     db.upsertRoom(room('r1'));
-    const base = Date.parse('2026-06-10T12:00:00.000Z');
+    const base = Date.now() - 60 * 60 * 1000;
     // Always returns full pages → would page forever without the cap.
     let serial = 0;
     const rc = new FakeRc().on(HIST, () => {
@@ -450,33 +450,32 @@ describe('SyncEngine delta', () => {
     expect(db.getMessage('b0')).toBeDefined();
   });
 
-  it('re-backfills (no syncMessages) when last_synced_at predates the backfill window', async () => {
+  it('still runs the delta path (syncMessages, no getHistory) when last_synced_at predates the backfill window', async () => {
     db = openDb(':memory:');
-    // 31 days stale → older than the 30-day backfill window → guard fires.
+    // 31 days stale → older than the 30-day backfill window. delta is
+    // watermark-forward and doesn't care how old the watermark is, so this
+    // must NOT fall back to a bounded re-backfill via getHistory.
     const stale = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
     db.upsertRoom(room('r1', { last_synced_at: stale }));
     const base = Date.now();
 
     const rc = new FakeRc()
-      .on(SYNC, () => {
-        throw new Error('syncMessages must not be called for a window-stale room');
-      })
-      .on(HIST, () => ({
-        // Short page → exhausted → backfill completes and sets watermarks.
-        messages: [rcMsg('h1', base)],
-      }));
+      .on(SYNC, () => ({
+        result: { updated: [rcMsg('d1', base)], deleted: [], cursor: { next: null, previous: null } },
+      }))
+      .on(HIST, () => {
+        throw new Error('history must not be called on the window-stale delta path');
+      });
 
     const engine = makeEngine(db, rc, fakeRooms(db), { ttlSeconds: 0, backfillDays: 30 });
     await engine.ensureRoomSynced('r1');
 
-    expect(rc.countOf(SYNC)).toBe(0);
-    expect(rc.countOf(HIST)).toBe(1);
-    expect(db.getMessage('h1')).toBeDefined();
+    expect(rc.countOf(SYNC)).toBe(1);
+    expect(rc.countOf(HIST)).toBe(0);
+    expect(db.getMessage('d1')).toBeDefined();
     const r = db.getRoom('r1')!;
-    // Watermark advanced past the stale value; backfill state recorded.
+    // Watermark advanced past the stale value via the delta path.
     expect(r.last_synced_at! > stale).toBe(true);
-    expect(r.fully_backfilled).toBe(1);
-    expect(r.oldest_loaded_ts).toBe(new Date(base).toISOString());
   });
 
   it('runs the normal delta path when last_synced_at is within the backfill window', async () => {
@@ -776,7 +775,7 @@ describe('SyncEngine intent-driven depth (deepenRoom / pickStaleUnreadRoom)', ()
   it('deepenRoom backfills a never-synced room and reports messagesLoaded', async () => {
     db = openDb(':memory:');
     db.upsertRoom(room('r1'));
-    const base = Date.parse('2026-06-10T12:00:00.000Z');
+    const base = Date.now() - 60 * 60 * 1000;
     const rc = new FakeRc().on(HIST, (_params, n) => {
       if (n === 0) {
         return { messages: Array.from({ length: 100 }, (_, i) => rcMsg(`p1-${i}`, base - i * 1000)) };

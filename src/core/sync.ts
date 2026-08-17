@@ -34,6 +34,10 @@ const MAX_SHALLOW_PAGES = 3;
  *  (enough to answer "show me recent messages") and then background-completes
  *  THAT room's remaining backfill. One page = 100 messages. */
 const COLD_FIRST_PAGES = 1;
+/** Sentinel "beginning of time" boundary for extendBackfill: passing this as
+ *  `beforeTs` means "extend as far back as backfillLimit/full history allows"
+ *  rather than stopping at a specific point. */
+const EPOCH_ISO = '1970-01-01T00:00:00.000Z';
 
 /**
  * Outcome of a sync request. `refreshing` is true when a background (un-awaited)
@@ -245,17 +249,6 @@ export class SyncEngine {
       // the rate limiter). A fresh bounded backfill from now is both lighter on
       // the server and more useful than that unbounded delta, so treat such a
       // room as first-touch and re-backfill instead.
-      const backfillCutoffMs =
-        Date.now() - this.backfillDays * 24 * 60 * 60 * 1000;
-      if (Date.parse(room.last_synced_at!) < backfillCutoffMs) {
-        log.debug(
-          `Room ${room.rid} last synced ${room.last_synced_at} predates the ` +
-            `${this.backfillDays}-day backfill window; resetting to a bounded ` +
-            'backfill instead of an unbounded syncMessages delta.',
-        );
-        await this.backfill(room);
-        return;
-      }
       await this.delta(room);
     }
     // else: fresh — zero network.
@@ -457,10 +450,9 @@ export class SyncEngine {
   private kickBackgroundBackfill(rid: string): void {
     const room = this.db.getRoom(rid);
     if (!room || room.oldest_loaded_ts == null) return;
-    const target = new Date(
-      Date.now() - this.backfillDays * 24 * 60 * 60 * 1000,
-    ).toISOString();
-    void this.extendBackfill(rid, target).catch((err) => {
+    // Same EPOCH_ISO reasoning as deepenRoom: extendBackfill's `beforeTs` is a
+    // stop-point guard, not a window bound — backfillLimit already caps depth.
+    void this.extendBackfill(rid, EPOCH_ISO).catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       log.debug(`Background backfill for room ${rid} failed: ${msg}`);
     });
@@ -747,13 +739,13 @@ export class SyncEngine {
           depth !== undefined ? Math.max(1, Math.ceil(depth / PAGE_SIZE)) : undefined;
         await this.withRoomLock(rid, () => this.backfill(r, { maxPages }));
       } else {
-        // Shallow/partial: page backwards toward the backfill-day window. The
-        // depth cap is enforced by backfillLimit inside extendBackfill; we bound
-        // the target at the configured window.
-        const target = new Date(
-          Date.now() - this.backfillDays * 24 * 60 * 60 * 1000,
-        ).toISOString();
-        await this.extendBackfill(rid, target);
+        // Shallow/partial: page backwards as far as extendBackfill's own
+        // backfillLimit allows. extendBackfill's `beforeTs` guard means "stop
+        // once we've reached this point" — passing epoch tells it to keep
+        // extending until backfillLimit (or full history) is hit, rather than
+        // bailing immediately when oldest_loaded_ts already predates a
+        // window-relative target.
+        await this.extendBackfill(rid, EPOCH_ISO);
       }
     }
 
