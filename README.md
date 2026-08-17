@@ -60,10 +60,10 @@ git clone <repo-url>   # or your fork/path
 cd rocket-cli
 npm install
 npm run build
-npm link               # optional: puts `rocket-cli` on your PATH
+npm link               # puts `rocket-cli` on your PATH — required for everything below
 ```
 
-After `npm link`, examples below can use `rocket-cli` instead of `node dist/cli.js`.
+`npm link` is required, not optional: every command in this README (including the MCP registration step) assumes `rocket-cli` is on your `PATH`.
 
 ## Get your credentials
 
@@ -71,11 +71,37 @@ After `npm link`, examples below can use `rocket-cli` instead of `node dist/cli.
 2. If the section is missing: an admin must enable the `API_Enable_Personal_Access_Tokens` setting, and your role needs the `create-personal-access-tokens` permission
 3. Name the token (e.g. `rocket-cli`), check **Ignore Two Factor Authentication** (without it, API calls may demand TOTP codes the CLI cannot answer), then click **Add**
 4. Copy both the **token** and the **user ID** — they appear together in the same confirmation dialog, and the token is shown only once
-5. Copy the example env file and fill in your values:
+5. Save them as a named profile:
    ```sh
-   cp .env.example .env
+   rocket-cli profiles --add personal --url https://chat.example.com --token <token> --user-id <user-id>
    ```
-   Set `ROCKETCHAT_URL`, `ROCKETCHAT_TOKEN`, and `ROCKETCHAT_USER_ID`. The CLI auto-loads `.env` from the directory you run it in; real environment variables always take precedence.
+   Profiles live in `~/.config/rocket-cli/profiles.json` (mode `600`, owner read/write only) and work from **any directory** — this matters because an MCP harness like Claude Code launches `rocket-cli serve` from whatever project you're in, not this repo. A `.env` file in this repo's folder only works when you run commands from inside it (see [Environment variables](#environment-variables) for that alternative).
+
+## Use it with Claude Code (MCP)
+
+An MCP harness (Claude Code, Claude Desktop) can launch `serve` with its working
+directory set to *whatever project you happen to be in* — not this repo. The CLI's
+`.env` autoload only ever looks in the **current directory**, so a plain `.env` setup
+does not travel with you. The profile you just created in [Get your credentials](#get-your-credentials)
+is what makes credentials reachable regardless of invocation directory, because
+profiles live in `~/.config/rocket-cli/profiles.json` (XDG-aware, not cwd-relative).
+
+Register it once, at user scope, pinned to that profile explicitly:
+
+```sh
+claude mcp add rocket-cli --scope user -e ROCKET_CLI_PROFILE=personal -- rocket-cli serve
+```
+
+Pin `ROCKET_CLI_PROFILE` explicitly per registration rather than relying on
+`profiles --default` — a `defaultProfile` is a convenience for ad-hoc CLI use, but an
+explicit env var on each MCP registration can't silently change behavior if the
+default profile is later reassigned.
+
+Verify with `claude mcp list` (should show `rocket-cli: rocket-cli serve - ✔ Connected`).
+A new Claude Code session is required to pick up newly registered MCP tools.
+
+For a second server (e.g. a read-only company profile registered alongside this one),
+see [Multiple servers](#multiple-servers-profiles).
 
 ## Quickstart
 
@@ -164,6 +190,14 @@ Register one MCP server per profile, each `serve` with its `ROCKET_CLI_PROFILE` 
 ```
 
 See `.mcp.json.example` for a copy-paste starting point.
+
+Registering a second, e.g. read-only, profile follows the same pattern (see
+[Use it with Claude Code (MCP)](#use-it-with-claude-code-mcp)):
+
+```sh
+rocket-cli profiles --add work --url https://chat.company.com --token <t> --user-id <id> --read-only
+claude mcp add rocketchat-work --scope user -e ROCKET_CLI_PROFILE=work -- rocket-cli serve
+```
 
 ## CLI usage
 
@@ -513,6 +547,22 @@ After the first sync the cache absorbs routine reads; typical interactive use ge
 | `ROCKET_CLI_BACKFILL_LIMIT` | no | `500` | Max messages to fetch on initial room backfill |
 | `ROCKET_CLI_EMOJI_IMAGES` | no | `true` | Cache custom-emoji image bytes. `false`/`0` caches metadata only (no image fetch/storage) |
 | `ROCKET_CLI_PROFILE` | no | — | Select a named profile from `profiles.json` (equivalent to `--profile`); used by MCP registrations |
+
+### Development: using a `.env` file instead of a profile
+
+Named profiles (see [Get your credentials](#get-your-credentials)) are the recommended
+default — they work from any directory. A `.env` file is a repo-local alternative
+mainly useful when developing rocket-cli itself, running commands from inside this
+checkout:
+
+```sh
+cp .env.example .env
+```
+
+Set `ROCKETCHAT_URL`, `ROCKETCHAT_TOKEN`, and `ROCKETCHAT_USER_ID` in it. The CLI
+auto-loads `.env` **only from the current working directory** — it does not travel
+with you to other projects the way a profile does — and real environment variables
+already set always take precedence over `.env` values.
 
 ## Validating against your own server
 

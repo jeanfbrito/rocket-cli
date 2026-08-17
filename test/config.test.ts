@@ -250,6 +250,31 @@ describe('loadConfig profiles', () => {
     }
   });
 
+  it('gives friendly profiles guidance when no credentials are found anywhere', () => {
+    expect(() => loadConfig()).toThrow(ConfigError);
+    try {
+      loadConfig();
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toMatch(/No Rocket\.Chat credentials found/);
+      expect(msg).toMatch(/rocket-cli profiles --add/);
+      expect(msg).toMatch(/ROCKET_CLI_PROFILE/);
+    }
+  });
+
+  it('keeps the specific missing-field message but still appends the profiles hint for partial config', () => {
+    process.env['ROCKETCHAT_URL'] = 'https://partial.example.com';
+    try {
+      loadConfig();
+      throw new Error('expected loadConfig to throw');
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toMatch(/ROCKETCHAT_TOKEN is required/);
+      expect(msg).toMatch(/ROCKETCHAT_USER_ID is required/);
+      expect(msg).toMatch(/rocket-cli profiles --add/);
+    }
+  });
+
   it('derives a per-profile db path under XDG_DATA_HOME', () => {
     seedStore({
       profiles: {

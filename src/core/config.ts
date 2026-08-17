@@ -288,7 +288,20 @@ export function loadConfig(profileName?: string): Config {
   const result = configSchema.safeParse(raw);
   if (!result.success) {
     const messages = result.error.issues.map((i) => i.message).join('; ');
-    throw new ConfigError(`Configuration error: ${messages}`);
+    const profilesHint =
+      'Set them up once with:\n' +
+      '  rocket-cli profiles --add <name> --url https://your-server --token <token> --user-id <id>\n' +
+      'Then select it with --profile <name>, ROCKET_CLI_PROFILE=<name>, or `rocket-cli profiles --default <name>`. ' +
+      '(Tokens: My Account → Personal Access Tokens. See README → Get your credentials.)';
+    // No credentials resolved from any source (profile, env, or .env) — this is
+    // the newcomer/zero-setup case. Lead with plain guidance instead of a raw
+    // zod field dump.
+    if (url === '' && token === '' && userId === '') {
+      throw new ConfigError(`No Rocket.Chat credentials found. ${profilesHint}`);
+    }
+    // Partial config (e.g. URL set but token missing) — keep the specific
+    // field messages, but still point at the profiles fix.
+    throw new ConfigError(`Configuration error: ${messages}. ${profilesHint}`);
   }
 
   mkdirSync(dirname(result.data.dbPath), { recursive: true });
