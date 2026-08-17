@@ -407,7 +407,11 @@ describe('mcp server', () => {
   });
 
   it('get_attention prioritizes, dedupes, and sections by source', async () => {
-    const ls = '2026-06-10T12:00:00.000Z';
+    // Anchor a few hours in the past so all offsets below stay within any
+    // day-window cutoff regardless of real wall-clock time.
+    const anchor = Date.now() - 3 * 60 * 60 * 1000;
+    const at = (minutesFromAnchor: number) => new Date(anchor + minutesFromAnchor * 60_000).toISOString();
+    const ls = at(0);
     rc.onUserInfo({ user: { _id: 'uid', username: 'jean' } });
     // Two unread rooms: a channel (C1) and a DM (D1). C1 also carries a thread
     // with an unread reply.
@@ -424,15 +428,15 @@ describe('mcp server', () => {
     db.setRoomSyncState('D1', { lastSyncedAt: new Date().toISOString() });
     db.upsertMessages([
       // Thread parent (read) + its unread reply.
-      { id: 'P', rid: 'C1', author_id: 'u1', author_username: 'alice', author_name: 'Alice', text: 'parent', ts: '2026-06-10T10:00:00.000Z', tmid: null, tcount: 1, tlm: '2026-06-10T13:00:00.000Z', edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
-      { id: 'tReply', rid: 'C1', author_id: 'u4', author_username: 'dave', author_name: 'Dave', text: 'unread reply', ts: '2026-06-10T13:00:00.000Z', tmid: 'P', tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
+      { id: 'P', rid: 'C1', author_id: 'u1', author_username: 'alice', author_name: 'Alice', text: 'parent', ts: at(-120), tmid: null, tcount: 1, tlm: at(60), edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
+      { id: 'tReply', rid: 'C1', author_id: 'u4', author_username: 'dave', author_name: 'Dave', text: 'unread reply', ts: at(60), tmid: 'P', tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
       // Plain unread channel message mentioning jean -> appears in BOTH mentions
       // and channel-unread; must surface ONLY in mentions with alsoUnread.
-      { id: 'cMention', rid: 'C1', author_id: 'u2', author_username: 'bob', author_name: 'Bob', text: 'hey @jean look', ts: '2026-06-10T13:30:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '["jean"]' },
+      { id: 'cMention', rid: 'C1', author_id: 'u2', author_username: 'bob', author_name: 'Bob', text: 'hey @jean look', ts: at(90), tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '["jean"]' },
       // Plain unread channel message, no mention -> channelUnreads.
-      { id: 'cPlain', rid: 'C1', author_id: 'u3', author_username: 'carol', author_name: 'Carol', text: 'unrelated', ts: '2026-06-10T13:45:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
+      { id: 'cPlain', rid: 'C1', author_id: 'u3', author_username: 'carol', author_name: 'Carol', text: 'unrelated', ts: at(105), tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
       // Unread DM message, no mention -> directUnreads.
-      { id: 'dm1', rid: 'D1', author_id: 'u5', author_username: 'cat', author_name: 'Rocket Cat', text: 'ping', ts: '2026-06-10T13:10:00.000Z', tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
+      { id: 'dm1', rid: 'D1', author_id: 'u5', author_username: 'cat', author_name: 'Rocket Cat', text: 'ping', ts: at(70), tmid: null, tcount: null, tlm: null, edited_at: null, system_type: null, attachments_json: null, deleted: 0, updated_at: null, mentions: '[]' },
     ]);
     db.setThreadSync('P', { lastSyncedAt: new Date().toISOString(), fullyLoaded: true });
     client = await connect(app);
@@ -667,8 +671,8 @@ describe('mcp server', () => {
     // A single short history page → fully backfilled.
     rc.onHistory({
       messages: [
-        { _id: 'h1', rid: 'C1', msg: 'older one', ts: '2026-06-01T00:01:00.000Z', u: { _id: 'u1', username: 'alice' } },
-        { _id: 'h2', rid: 'C1', msg: 'older two', ts: '2026-06-01T00:02:00.000Z', u: { _id: 'u2', username: 'bob' } },
+        { _id: 'h1', rid: 'C1', msg: 'older one', ts: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(), u: { _id: 'u1', username: 'alice' } },
+        { _id: 'h2', rid: 'C1', msg: 'older two', ts: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(), u: { _id: 'u2', username: 'bob' } },
       ],
     });
     client = await connect(app);

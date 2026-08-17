@@ -160,9 +160,9 @@ describe('collectMentions', () => {
     });
     seedRoom(db, 'C1');
     db.upsertMessages([
-      msg('me1', 'C1', '["jean"]', { ts: '2026-06-10T11:00:00.000Z' }),
-      msg('me2', 'C1', '["bob","jean"]', { ts: '2026-06-10T13:00:00.000Z' }),
-      msg('other', 'C1', '["bob"]', { ts: '2026-06-10T14:00:00.000Z' }),
+      msg('me1', 'C1', '["jean"]', { ts: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString() }),
+      msg('me2', 'C1', '["bob","jean"]', { ts: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString() }),
+      msg('other', 'C1', '["bob"]', { ts: new Date(Date.now()).toISOString() }),
     ]);
 
     const report = await collectMentions(app, { sinceDays: 30 });
@@ -200,9 +200,9 @@ describe('collectMentions', () => {
     rc.onSubscriptions({ update: [sub({ rid: 'C1', name: 'general', t: 'c' })], remove: [] });
     seedRoom(db, 'C1');
     db.upsertMessages([
-      msg('mine', 'C1', '["jean"]', { ts: '2026-06-10T11:00:00.000Z' }),
-      msg('wide', 'C1', '["all"]', { ts: '2026-06-10T12:00:00.000Z' }),
-      msg('here', 'C1', '["here"]', { ts: '2026-06-10T13:00:00.000Z' }),
+      msg('mine', 'C1', '["jean"]', { ts: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString() }),
+      msg('wide', 'C1', '["all"]', { ts: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() }),
+      msg('here', 'C1', '["here"]', { ts: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString() }),
     ]);
 
     const off = await collectMentions(app, { sinceDays: 30 });

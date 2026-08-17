@@ -125,7 +125,7 @@ function msg(id: string, rid: string, over: Partial<MessageRow> = {}): MessageRo
     author_username: 'alice',
     author_name: 'Alice',
     text: `msg ${id}`,
-    ts: '2026-06-10T13:00:00.000Z',
+    ts: at(60),
     tmid: null,
     tcount: null,
     tlm: null,
@@ -139,7 +139,12 @@ function msg(id: string, rid: string, over: Partial<MessageRow> = {}): MessageRo
   };
 }
 
-const LS = '2026-06-10T12:00:00.000Z';
+// Anchor a few hours in the past so all offsets below stay within any day-window
+// cutoff regardless of real wall-clock time (see docs/KNOWN_ISSUES.md history).
+const ANCHOR = Date.now() - 3 * 60 * 60 * 1000;
+const at = (minutesFromAnchor: number) => new Date(ANCHOR + minutesFromAnchor * 60_000).toISOString();
+
+const LS = at(0);
 
 describe('collectAttention', () => {
   let db: Db;
@@ -191,8 +196,8 @@ describe('collectAttention', () => {
     seedRoom(db, 'C1', { unread: 1, ls: LS });
     seedRoom(db, 'D1', { t: 'd', unread: 1, ls: LS });
     db.upsertMessages([
-      msg('cPlain', 'C1', { ts: '2026-06-10T13:10:00.000Z' }),
-      msg('dm1', 'D1', { ts: '2026-06-10T13:20:00.000Z' }),
+      msg('cPlain', 'C1', { ts: at(70) }),
+      msg('dm1', 'D1', { ts: at(80) }),
     ]);
 
     const report = await collectAttention(app, { sinceDays: 30 });
@@ -211,9 +216,9 @@ describe('collectAttention', () => {
     seedRoom(db, 'C1', { unread: 2, ls: LS });
     db.upsertMessages([
       // Mentions jean AND unread (ts > ls) -> mentions only, alsoUnread.
-      msg('mention', 'C1', { mentions: '["jean"]', ts: '2026-06-10T13:30:00.000Z' }),
+      msg('mention', 'C1', { mentions: '["jean"]', ts: at(90) }),
       // Plain unread -> channelUnreads.
-      msg('plain', 'C1', { ts: '2026-06-10T13:40:00.000Z' }),
+      msg('plain', 'C1', { ts: at(100) }),
     ]);
 
     const report = await collectAttention(app, { sinceDays: 30 });
@@ -241,10 +246,10 @@ describe('collectAttention', () => {
     });
     seedRoom(db, 'C1', { unread: 1, ls: LS });
     db.upsertMessages([
-      msg('P', 'C1', { tcount: 1, tlm: '2026-06-10T13:00:00.000Z', ts: '2026-06-10T10:00:00.000Z' }),
+      msg('P', 'C1', { tcount: 1, tlm: at(60), ts: at(-120) }),
       // Two unread replies: one mentions jean (-> mentions), one does not (-> thread).
-      msg('rMine', 'C1', { tmid: 'P', mentions: '["jean"]', ts: '2026-06-10T13:05:00.000Z' }),
-      msg('rOther', 'C1', { tmid: 'P', ts: '2026-06-10T13:10:00.000Z' }),
+      msg('rMine', 'C1', { tmid: 'P', mentions: '["jean"]', ts: at(65) }),
+      msg('rOther', 'C1', { tmid: 'P', ts: at(70) }),
     ]);
     db.setThreadSync('P', { lastSyncedAt: new Date().toISOString(), fullyLoaded: true });
 
@@ -267,11 +272,11 @@ describe('collectAttention', () => {
     seedRoom(db, 'C1', { unread: 1, ls: LS });
     seedRoom(db, 'D1', { t: 'd', unread: 1, ls: LS });
     db.upsertMessages([
-      msg('cMention', 'C1', { mentions: '["jean"]', ts: '2026-06-10T13:30:00.000Z' }),
-      msg('cPlain', 'C1', { ts: '2026-06-10T13:45:00.000Z' }),
-      msg('P', 'C1', { tcount: 1, tlm: '2026-06-10T13:00:00.000Z', ts: '2026-06-10T10:00:00.000Z' }),
-      msg('tReply', 'C1', { tmid: 'P', ts: '2026-06-10T13:05:00.000Z' }),
-      msg('dm1', 'D1', { ts: '2026-06-10T13:20:00.000Z' }),
+      msg('cMention', 'C1', { mentions: '["jean"]', ts: at(90) }),
+      msg('cPlain', 'C1', { ts: at(105) }),
+      msg('P', 'C1', { tcount: 1, tlm: at(60), ts: at(-120) }),
+      msg('tReply', 'C1', { tmid: 'P', ts: at(65) }),
+      msg('dm1', 'D1', { ts: at(80) }),
     ]);
     db.setThreadSync('P', { lastSyncedAt: new Date().toISOString(), fullyLoaded: true });
 
@@ -298,7 +303,7 @@ describe('collectAttention', () => {
     });
     seedRoom(db, 'C1', { ls: LS });
     db.upsertMessages([
-      msg('wide', 'C1', { mentions: '["all"]', ts: '2026-06-10T11:00:00.000Z' }),
+      msg('wide', 'C1', { mentions: '["all"]', ts: at(-60) }),
     ]);
 
     const off = await collectAttention(app, { sinceDays: 30 });
