@@ -36,3 +36,4 @@ The write tools (`send_message`, `add_reaction`, `upload_file`) are only registe
 - Do NOT post to the room root when the context is a thread — reply in-thread via `threadId`.
 - Do NOT repeatedly retry a write that failed on a read-only profile — degrade to drafting.
 - Do NOT skip confirmation for user-visible sends unless the user already gave exact text + target.
+- Do NOT use `send` to seed test messages for end-to-end encrypted (E2EE) rooms. `send` posts plain text: the server stores it unencrypted, and an E2EE client does not see an encrypted message. Send encrypted test messages through a client that has the room key.
